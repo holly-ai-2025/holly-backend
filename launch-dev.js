@@ -24,6 +24,12 @@ function run(cmd, args, options = {}) {
   if (!(await isPortInUse(11111))) {
     const ssh = run('ssh', ['-N', '-L', '11111:localhost:11434', '-p', '50015', 'root@99.243.100.183']);
     processes.push(ssh);
+
+    // Ensure remote Ollama server is running
+    const remoteCmd =
+      "if ! ss -tuln | grep -q ':11434'; then " +
+      'OLLAMA_HOST=0.0.0.0:11434 nohup ollama serve >/tmp/ollama.log 2>&1 & fi';
+    run('ssh', [`-p 50015 root@99.243.100.183 "${remoteCmd}"`]);
   } else {
     console.log('🔁 SSH tunnel already running on port 11111');
   }

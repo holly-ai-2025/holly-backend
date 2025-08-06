@@ -1,3 +1,8 @@
+"""
+Ubuntu packages required for full TTS support:
+    sudo apt-get install ffmpeg libavcodec-extra lame
+"""
+
 import sys
 import os
 from TTS.api import TTS

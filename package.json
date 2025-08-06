@@ -5,5 +5,10 @@
   "scripts": {
     "launch": "node launch-dev.js",
     "launch-dev": "node launch-dev.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^5.1.0",
+    "node-fetch": "^2.7.0"
   }
 }

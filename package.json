@@ -1,0 +1,8 @@
+{
+  "name": "holly-backend",
+  "version": "1.0.0",
+  "main": "server.js",
+  "scripts": {
+    "launch": "node launch-dev.js"
+  }
+}

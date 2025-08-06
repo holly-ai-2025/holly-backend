@@ -3,8 +3,8 @@
   "version": "1.0.0",
   "main": "server.js",
   "scripts": {
-    "launch": "./launch-dev.js",
-    "launch-dev": "./launch-dev.js"
+    "launch": "node launch-dev.js",
+    "launch-dev": "node launch-dev.js"
   },
   "dependencies": {
     "express": "^4.21.2",

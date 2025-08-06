@@ -15,9 +15,6 @@ app.use(express.json());
 const llmRouter = require('./routes/llm.js');
 app.use('/llm', llmRouter);
 
-// Route for TTS endpoint
-const ttsRouter = require('./routes/tts.js');
-app.use('/tts', ttsRouter);
 
 // Start the server
 const PORT = 3001;

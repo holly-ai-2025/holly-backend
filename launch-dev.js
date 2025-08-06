@@ -1,6 +1,47 @@
-const { spawn } = require('child_process');
+#!/usr/bin/env node
+// Reminder: configure GitHub access using SSH, not HTTPS, otherwise `git pull`
+// will fail on headless environments like Vast.ai.
+
+const { spawn, spawnSync, execSync } = require('child_process');
 const net = require('net');
 const path = require('path');
+const fs = require('fs');
+const crypto = require('crypto');
+
+// Ensure we're running from the backend directory
+const backendDir = path.resolve(__dirname);
+process.chdir(backendDir);
+
+function runSync(cmd, args, options = {}) {
+  const result = spawnSync(cmd, args, { stdio: 'inherit', shell: true, ...options });
+  if (result.status !== 0) {
+    process.exit(result.status ?? 1);
+  }
+}
+
+console.log('📁 In backend directory:', backendDir);
+console.log('🔄 Pulling latest code from GitHub...');
+runSync('git', ['pull', 'origin', 'main']);
+
+// Compute package.json hash to detect changes
+const pkgPath = path.join(backendDir, 'package.json');
+const pkgHash = crypto.createHash('sha256').update(fs.readFileSync(pkgPath)).digest('hex');
+const hashFile = path.join(backendDir, 'node_modules', '.package-json-hash');
+let lastHash;
+try {
+  lastHash = fs.readFileSync(hashFile, 'utf8').trim();
+} catch (e) {}
+
+if (pkgHash !== lastHash) {
+  console.log('📦 package.json changed, running npm install...');
+  runSync('npm', ['install']);
+  fs.writeFileSync(hashFile, pkgHash);
+} else {
+  console.log('📦 Dependencies up to date, skipping npm install.');
+}
+
+const commitHash = execSync('git rev-parse --short HEAD').toString().trim();
+console.log(`🔖 Current commit: ${commitHash}`);
 
 // Utility to check if a TCP port is already in use
 function isPortInUse(port) {
@@ -36,6 +77,7 @@ function run(cmd, args, options = {}) {
 
   // Start backend server (server.js) if port 3001 is free
   if (!(await isPortInUse(3001))) {
+    console.log('🚀 Starting backend server...');
     const backend = run('node', ['server.js']);
     processes.push(backend);
   } else {
@@ -44,6 +86,7 @@ function run(cmd, args, options = {}) {
 
   // Start frontend dev server in ../holly-frontend if port 5173 is free
   if (!(await isPortInUse(5173))) {
+    console.log('🚀 Starting frontend dev server...');
     const frontend = run('npm', ['run', 'dev'], { cwd: path.resolve(__dirname, '../holly-frontend') });
     processes.push(frontend);
   } else {

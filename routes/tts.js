@@ -1,7 +1,11 @@
 const express = require('express');
-const router = express.Router();
+const cors = require('cors');
 const { spawn } = require('child_process');
 const fs = require('fs');
+const path = require('path');
+
+const router = express.Router();
+router.use(cors());
 
 router.post('/', (req, res) => {
   const { text } = req.body;
@@ -9,7 +13,8 @@ router.post('/', (req, res) => {
     return res.status(400).json({ error: 'Text is required' });
   }
 
-  const python = spawn('python3', ['tts.py', text]);
+  const scriptPath = path.join(__dirname, '..', 'python', 'tts.py');
+  const python = spawn('python3', [scriptPath, text]);
   let stdout = '';
   let stderr = '';
 
@@ -54,3 +59,15 @@ router.post('/', (req, res) => {
 });
 
 module.exports = router;
+
+// Allow running this file directly with `node routes/tts.js`
+if (require.main === module) {
+  const app = express();
+  app.use(cors());
+  app.use(express.json());
+  app.use('/tts', router);
+  const PORT = process.env.PORT || 3001;
+  app.listen(PORT, () => {
+    console.log(`TTS service running on http://localhost:${PORT}`);
+  });
+}

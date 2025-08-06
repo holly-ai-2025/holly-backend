@@ -4,8 +4,7 @@
   "main": "server.js",
   "scripts": {
     "launch": "node launch-dev.js",
-    "launch-dev": "node launch-dev.js",
-    "tts": "node routes/tts.js"
+    "launch-dev": "node launch-dev.js"
   },
   "dependencies": {
     "express": "^4.21.2",

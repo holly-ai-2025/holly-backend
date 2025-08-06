@@ -21,9 +21,12 @@ router.post('/', async (req, res) => {
     currentSession.abort();
   }
 
-  res.setHeader('Content-Type', 'audio/mpeg');
-  res.setHeader('Transfer-Encoding', 'chunked');
-  res.setHeader('Trailer', 'X-Transcript');
+  res.writeHead(200, {
+    'Content-Type': 'audio/mpeg',
+    'Transfer-Encoding': 'chunked',
+    'Connection': 'keep-alive',
+    'Trailer': 'X-Transcript',
+  });
 
   const scriptPath = path.join(__dirname, '..', 'python', 'tts.py');
   const abortController = new AbortController();

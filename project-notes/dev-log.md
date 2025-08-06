@@ -8,3 +8,11 @@
 
 - Added `routes/llm.js` to expose `/llm` POST route
 - Frontend or tools can now send prompts to LLaMA backend
+
+## ✅ 2025-08-06 – Backend Server + LLaMA API
+
+- Created `server.js` to run the Express backend on port 3001
+- Connected route handler from `routes/llm.js` to accept POST prompts
+- Backend can now receive prompts from the frontend and pass them to the LLaMA 3.1 model via Ollama
+- Confirmed Ollama is still accessible at `http://99.243.100.183:50093`
+

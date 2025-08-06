@@ -4,3 +4,7 @@
 - Verified Ollama API running on port 50093
 - Logged setup for repeatability and future upgrades
 
+## ✅ 2025-08-06 – LLaMA API Endpoint
+
+- Added `routes/llm.js` to expose `/llm` POST route
+- Frontend or tools can now send prompts to LLaMA backend

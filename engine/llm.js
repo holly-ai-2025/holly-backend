@@ -2,7 +2,7 @@ const fetch = global.fetch || require('node-fetch');
 
 async function askLlama(prompt) {
   try {
-    const response = await fetch('http://99.243.100.183:50093/api/generate', {
+    const response = await fetch('http://localhost:11111/api/generate', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -19,7 +19,7 @@ async function askLlama(prompt) {
     const data = await response.json();
     return data;
   } catch (error) {
-    console.error('Error querying Llama:', error);
+    console.error('Error querying Llama:', error.message);
     throw error;
   }
 }

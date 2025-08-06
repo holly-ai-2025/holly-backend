@@ -1,8 +1,10 @@
 """
 Text-to-Speech generation using Coqui TTS.
 
-Dependencies for Ubuntu:
-    sudo apt-get update && sudo apt-get install -y ffmpeg
+Ubuntu package requirements:
+    sudo apt-get update && sudo apt-get install -y ffmpeg libavcodec-extra lame
+
+Python package requirements:
     pip install TTS pydub
 
 This script accepts text as a command-line argument, synthesizes speech

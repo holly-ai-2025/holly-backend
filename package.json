@@ -6,5 +6,10 @@
     "launch": "node launch-dev.js",
     "launch-dev": "node launch-dev.js",
     "tts": "node routes/tts.js"
+  },
+  "dependencies": {
+    "express": "^4.21.2",
+    "cors": "^2.8.5",
+    "node-fetch": "^2.7.0"
   }
 }

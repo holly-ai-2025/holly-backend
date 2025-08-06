@@ -21,17 +21,12 @@ router.post('/', async (req, res) => {
     currentSession.abort();
   }
 
-  res.writeHead(200, {
-    'Content-Type': 'audio/mpeg',
-    'Transfer-Encoding': 'chunked',
-    'Connection': 'keep-alive',
-    'Trailer': 'X-Transcript',
-  });
-
   const scriptPath = path.join(__dirname, '..', 'python', 'tts.py');
   const abortController = new AbortController();
   let closed = false;
   let python = null;
+  let headersSent = false;
+  let stderrBuffer = '';
 
   const cleanup = () => {
     if (currentSession && python && currentSession.python === python) {
@@ -88,18 +83,49 @@ router.post('/', async (req, res) => {
     python = spawn('python3', [scriptPath, '--stream']);
 
     python.stdout.on('data', (chunk) => {
+      if (!headersSent) {
+        res.writeHead(200, {
+          'Content-Type': 'audio/mpeg',
+          'Transfer-Encoding': 'chunked',
+          'Connection': 'keep-alive',
+          'Trailer': 'X-Transcript',
+        });
+        headersSent = true;
+      }
       res.write(chunk);
     });
 
     python.stderr.on('data', (data) => {
-      console.error('TTS error:', data.toString());
+      const msg = data.toString();
+      stderrBuffer += msg;
+      console.error('TTS stderr:', msg);
     });
 
-    python.on('close', () => {
+    python.on('close', (code) => {
       cleanup();
       if (!closed) {
-        res.addTrailers({ 'X-Transcript': textBuffer });
-        res.end();
+        if (!headersSent) {
+          console.error('tts.py exited with code', code, stderrBuffer);
+          res.status(500).json({ error: 'TTS generation failed' });
+        } else if (code !== 0) {
+          console.error('tts.py exited with code', code, stderrBuffer);
+          res.end();
+        } else {
+          res.addTrailers({ 'X-Transcript': textBuffer });
+          res.end();
+        }
+      }
+    });
+
+    python.on('error', (err) => {
+      cleanup();
+      console.error('Failed to start tts.py:', err.message);
+      if (!closed) {
+        if (headersSent) {
+          res.end();
+        } else {
+          res.status(500).json({ error: 'TTS process error' });
+        }
       }
     });
 
@@ -121,7 +147,7 @@ router.post('/', async (req, res) => {
       python.kill();
     }
     if (!closed) {
-      res.status(500).end();
+      res.status(500).json({ error: 'Failed to generate speech' });
     }
   }
 });

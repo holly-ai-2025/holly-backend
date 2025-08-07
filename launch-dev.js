@@ -10,6 +10,7 @@ const crypto = require('crypto');
 
 // On Windows the npm executable is npm.cmd
 const npmCmd = process.platform === 'win32' ? 'npm.cmd' : 'npm';
+const cloudflaredPath = '/usr/local/bin/cloudflared';
 
 // Ensure we're running from the backend directory
 const backendDir = path.resolve(__dirname);
@@ -27,23 +28,13 @@ function runSync(cmd, args, options = {}) {
 }
 
 console.log('📁 In backend directory:', backendDir);
-console.log('🔄 Pulling latest code from GitHub...');
-runSync('git', ['pull', 'origin', 'main']);
-
-console.log('🔄 Syncing remote Vast.ai backend with latest GitHub commit...');
-const remotePullCmd = `
-  cd /root/holly-backend &&
-  LOCAL_HASH=$(git rev-parse HEAD) &&
-  git fetch origin main &&
-  REMOTE_HASH=$(git rev-parse origin/main) &&
-  if [ "$LOCAL_HASH" != "$REMOTE_HASH" ]; then
-    echo "🔄 Updating remote backend...";
-    git reset --hard origin/main;
-  else
-    echo "✅ Remote backend already up to date.";
-  fi
-`.trim();
-runSync('ssh', ['-p', '50015', 'root@99.243.100.183', remotePullCmd], { shell: false });
+const hasOrigin = spawnSync('git', ['remote']).stdout.toString().split('\n').includes('origin');
+if (hasOrigin) {
+  console.log('🔄 Pulling latest code from GitHub...');
+  runSync('git', ['pull', 'origin', 'main']);
+} else {
+  console.log('⚠️ Skipping git pull; no origin remote configured.');
+}
 
 // Compute package.json hash to detect changes
 const pkgPath = path.join(backendDir, 'package.json');
@@ -91,22 +82,6 @@ function run(cmd, args, options = {}) {
 (async () => {
   const processes = [];
 
-  // Establish SSH tunnel to Vast.ai instance if not already running
-  if (!(await isPortInUse(11111))) {
-      const ssh = run('ssh', ['-N', '-L', '11111:localhost:11434', '-p', '50015', 'root@99.243.100.183'], { shell: false });
-    processes.push(ssh);
-
-    // Ensure remote Ollama server is running
-      const remoteCmd = [
-        "if ! ss -tuln | grep -q ':11434'; then",
-        'OLLAMA_HOST=0.0.0.0:11434 nohup ollama serve >/tmp/ollama.log 2>&1 &',
-        'fi'
-      ].join(' ');
-      run('ssh', ['-p', '50015', 'root@99.243.100.183', remoteCmd], { shell: false });
-  } else {
-    console.log('🔁 SSH tunnel already running on port 11111');
-  }
-
   // Start backend server (server.js) if port 3001 is free
   if (!(await isPortInUse(3001))) {
     console.log('🚀 Starting backend server...');
@@ -114,6 +89,14 @@ function run(cmd, args, options = {}) {
     processes.push(backend);
   } else {
     console.log('🔁 Backend server already running on port 3001');
+  }
+
+  // Start Cloudflare tunnel to expose the backend
+  console.log('🚇 Starting Cloudflare tunnel...');
+  const tunnelConfig = path.join(__dirname, '.cloudflared', 'config.yml');
+  const tunnel = run(cloudflaredPath, ['tunnel', '--config', tunnelConfig, 'run', 'holly-backend']);
+  if (tunnel) {
+    processes.push(tunnel);
   }
 
   // Start frontend dev server in ../holly-frontend if port 5173 is free

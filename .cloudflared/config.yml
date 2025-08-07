@@ -1,0 +1,7 @@
+tunnel: holly-backend
+credentials-file: /root/.cloudflared/4b730e95-6e39-4c32-a5c5-6cdb55f1a6b2.json
+
+ingress:
+  - hostname: api.hollyai.xyz
+    service: http://localhost:3001
+  - service: http_status:404

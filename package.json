@@ -4,7 +4,10 @@
   "main": "server.js",
   "scripts": {
     "launch": "node launch-dev.js",
-    "launch-dev": "node launch-dev.js"
+    "launch-dev": "node launch-dev.js",
+    "tunnel": "/usr/local/bin/cloudflared tunnel --config .cloudflared/config.yml run holly-backend",
+    "pm2": "pm2 start launch-dev.js --name holly-backend && pm2 save",
+    "test": "echo 'OK'"
   },
   "dependencies": {
     "express": "^4.21.2",

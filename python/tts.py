@@ -25,42 +25,65 @@ from TTS.api import TTS
 from pydub import AudioSegment
 
 
+
 def synthesize(text: str, stream: bool) -> None:
     """Generate speech from *text* and either stream or save to disk."""
 
-    tts = TTS(
-        model_name="tts_models/en/ljspeech/tacotron2-DDC",
-        progress_bar=False,
-        gpu=False,
-    )
+    try:
+        sys.stderr.write(
+            f"[tts.py] starting synthesis stream={stream} text_length={len(text)}\n"
+        )
+        tts = TTS(
+            model_name="tts_models/en/ljspeech/tacotron2-DDC",
+            progress_bar=False,
+            gpu=False,
+        )
+        sys.stderr.write("[tts.py] model loaded\n")
 
-    if stream:
-        audio = np.array(tts.tts(text))
-        sample_rate = getattr(tts, "sample_rate", 22050)
-        if audio.dtype != np.int16:
-            audio = (audio * (2 ** 15 - 1)).astype(np.int16)
-        segment = AudioSegment(
-            audio.tobytes(),
-            frame_rate=sample_rate,
-            sample_width=audio.dtype.itemsize,
-            channels=1,
-        )
-        stdout = os.fdopen(sys.stdout.fileno(), "wb", buffering=0)
-        segment.export(
-            stdout,
-            format="mp3",
-            parameters=["-codec:a", "libmp3lame", "-b:a", "192k", "-flush_packets", "1", "-fflags", "+nobuffer"],
-        )
-        stdout.flush()
-    else:
-        tmpdir = tempfile.gettempdir()
-        uid = uuid.uuid4().hex
-        wav_path = os.path.join(tmpdir, f"{uid}.wav")
-        mp3_path = os.path.join(tmpdir, f"{uid}.mp3")
-        tts.tts_to_file(text=text, file_path=wav_path)
-        AudioSegment.from_wav(wav_path).export(mp3_path, format="mp3")
-        os.remove(wav_path)
-        print(mp3_path)
+        if stream:
+            audio = np.array(tts.tts(text))
+            sample_rate = getattr(tts, "sample_rate", 22050)
+            if audio.dtype != np.int16:
+                audio = (audio * (2 ** 15 - 1)).astype(np.int16)
+            sys.stderr.write(
+                f"[tts.py] streaming {len(audio)} samples at {sample_rate}Hz\n"
+            )
+            segment = AudioSegment(
+                audio.tobytes(),
+                frame_rate=sample_rate,
+                sample_width=audio.dtype.itemsize,
+                channels=1,
+            )
+            stdout = os.fdopen(sys.stdout.fileno(), "wb", buffering=0)
+            segment.export(
+                stdout,
+                format="mp3",
+                parameters=[
+                    "-codec:a",
+                    "libmp3lame",
+                    "-b:a",
+                    "192k",
+                    "-flush_packets",
+                    "1",
+                    "-fflags",
+                    "+nobuffer",
+                ],
+            )
+            stdout.flush()
+            sys.stderr.write("[tts.py] streaming complete\n")
+        else:
+            tmpdir = tempfile.gettempdir()
+            uid = uuid.uuid4().hex
+            wav_path = os.path.join(tmpdir, f"{uid}.wav")
+            mp3_path = os.path.join(tmpdir, f"{uid}.mp3")
+            tts.tts_to_file(text=text, file_path=wav_path)
+            AudioSegment.from_wav(wav_path).export(mp3_path, format="mp3")
+            os.remove(wav_path)
+            print(mp3_path)
+            sys.stderr.write(f"[tts.py] wrote MP3 to {mp3_path}\n")
+    except Exception as exc:
+        sys.stderr.write(f"[tts.py] error: {exc}\n")
+        raise
 
 
 def main() -> None:

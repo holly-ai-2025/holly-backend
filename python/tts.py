@@ -38,22 +38,23 @@ def load_model() -> TTS:
     """Load and return the TTS model, logging any issues."""
 
     try:
-        sys.stderr.write(f"[tts.py] loading model {MODEL_NAME}\n")
+        print(f"[tts.py] loading model {MODEL_NAME}", file=sys.stderr)
         with redirect_stdout(sys.stderr):
             tts = TTS(model_name=MODEL_NAME, progress_bar=False, gpu=False)
-        sys.stderr.write("[tts.py] model loaded\n")
+        print("[tts.py] model loaded", file=sys.stderr)
         return tts
     except Exception as exc:
-        sys.stderr.write(f"[tts.py] model load error: {exc}\n")
+        print(f"[tts.py] model load error: {exc}", file=sys.stderr)
         raise
 
 
 
-def synthesize(tts: TTS, text: str, stream: bool) -> None:
+def synthesize(tts: TTS, text: str, stream: bool, real_stdout=None, devnull=None) -> None:
     """Generate speech from *text* and either stream or save to disk."""
 
-    sys.stderr.write(
-        f"[tts.py] starting synthesis stream={stream} text_length={len(text)}\n"
+    print(
+        f"[tts.py] starting synthesis stream={stream} text_length={len(text)}",
+        file=sys.stderr,
     )
 
     try:
@@ -65,8 +66,9 @@ def synthesize(tts: TTS, text: str, stream: bool) -> None:
             sample_rate = getattr(tts, "sample_rate", 22050)
             if audio.dtype != np.int16:
                 audio = (audio * (2 ** 15 - 1)).astype(np.int16)
-            sys.stderr.write(
-                f"[tts.py] streaming {len(audio)} samples at {sample_rate}Hz\n"
+            print(
+                f"[tts.py] streaming {len(audio)} samples at {sample_rate}Hz",
+                file=sys.stderr,
             )
             segment = AudioSegment(
                 audio.tobytes(),
@@ -74,6 +76,8 @@ def synthesize(tts: TTS, text: str, stream: bool) -> None:
                 sample_width=audio.dtype.itemsize,
                 channels=1,
             )
+            # restore real stdout only for MP3 export
+            sys.stdout = real_stdout
             stdout = os.fdopen(sys.stdout.fileno(), "wb", buffering=0)
             segment.export(
                 stdout,
@@ -90,7 +94,10 @@ def synthesize(tts: TTS, text: str, stream: bool) -> None:
                 ],
             )
             stdout.flush()
-            sys.stderr.write("[tts.py] streaming complete\n")
+            # silence stdout again after streaming
+            if devnull is not None:
+                sys.stdout = devnull
+            print("[tts.py] streaming complete", file=sys.stderr)
         else:
             tmpdir = tempfile.gettempdir()
             uid = uuid.uuid4().hex
@@ -103,9 +110,9 @@ def synthesize(tts: TTS, text: str, stream: bool) -> None:
             AudioSegment.from_wav(wav_path).export(mp3_path, format="mp3")
             os.remove(wav_path)
             print(mp3_path, file=sys.stderr)
-            sys.stderr.write(f"[tts.py] wrote MP3 to {mp3_path}\n")
+            print(f"[tts.py] wrote MP3 to {mp3_path}", file=sys.stderr)
     except Exception as exc:
-        sys.stderr.write(f"[tts.py] inference error: {exc}\n")
+        print(f"[tts.py] inference error: {exc}", file=sys.stderr)
         raise
 
 
@@ -116,13 +123,24 @@ def main() -> None:
     args = parser.parse_args()
 
     input_text = args.text if args.text else sys.stdin.read().strip()
+
+    orig_stdout = sys.stdout
+    devnull = None
+    if args.stream:
+        devnull = open(os.devnull, "w")
+        sys.stdout = devnull
+
     try:
         tts = load_model()
-        synthesize(tts, input_text, args.stream)
+        synthesize(tts, input_text, args.stream, orig_stdout, devnull)
     except Exception as exc:
         error = {"error": str(exc)}
-        sys.stderr.write(json.dumps(error) + "\n")
+        print(json.dumps(error), file=sys.stderr)
         sys.exit(1)
+    finally:
+        if args.stream:
+            sys.stdout = orig_stdout
+            devnull.close()
 
 
 if __name__ == "__main__":

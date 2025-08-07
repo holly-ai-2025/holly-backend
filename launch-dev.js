@@ -8,6 +8,9 @@ const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
 
+// On Windows the npm executable is npm.cmd
+const npmCmd = process.platform === 'win32' ? 'npm.cmd' : 'npm';
+
 // Ensure we're running from the backend directory
 const backendDir = path.resolve(__dirname);
 process.chdir(backendDir);
@@ -49,7 +52,7 @@ try {
 
 if (pkgHash !== lastHash) {
   console.log('📦 package.json changed, running npm install...');
-  runSync('npm', ['install']);
+  runSync(npmCmd, ['install']);
   fs.writeFileSync(hashFile, pkgHash);
 } else {
   console.log('📦 Dependencies up to date, skipping npm install.');
@@ -104,7 +107,7 @@ function run(cmd, args, options = {}) {
   // Start frontend dev server in ../holly-frontend if port 5173 is free
   if (!(await isPortInUse(5173))) {
     console.log('🚀 Starting frontend dev server...');
-    const frontend = run('npm', ['run', 'dev'], { cwd: path.resolve(__dirname, '../holly-frontend') });
+    const frontend = run(npmCmd, ['run', 'dev'], { cwd: path.resolve(__dirname, '../holly-frontend') });
     processes.push(frontend);
   } else {
     console.log('🔁 Frontend dev server already running on port 5173');

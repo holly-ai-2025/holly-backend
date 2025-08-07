@@ -13,6 +13,11 @@ let currentSession = null;
 router.post('/', async (req, res) => {
   const { prompt } = req.body;
   const stream = req.body.stream === true;
+
+  console.log('TTS request received', {
+    stream,
+    promptLength: prompt ? prompt.length : 0,
+  });
   if (!prompt) {
     return res.status(400).json({ error: 'Prompt is required' });
   }
@@ -99,6 +104,10 @@ router.post('/', async (req, res) => {
       }
     }
 
+    console.log('LLM response length for TTS', textBuffer.length);
+
+    console.log('Spawning tts.py at', scriptPath);
+
     python = spawn('python3', [scriptPath, '--stream']);
 
     const isProbablyMp3 = (chunk) => {
@@ -110,9 +119,13 @@ router.post('/', async (req, res) => {
 
     python.stdout.on('data', (chunk) => {
       if (!headersSent) {
+        console.log('First TTS chunk received', {
+          length: chunk.length,
+          firstBytes: chunk.slice(0, 10).toString('hex'),
+        });
         if (!isProbablyMp3(chunk)) {
           stderrBuffer += 'Invalid MP3 header\n';
-          console.error('Invalid MP3 header');
+          console.error('Invalid MP3 header', chunk.slice(0, 10).toString('hex'));
           python.kill();
           return;
         }
@@ -137,7 +150,11 @@ router.post('/', async (req, res) => {
       cleanup();
       if (!closed) {
         if (!headersSent || audioBytes === 0 || code !== 0) {
-          console.error('tts.py exited with code', code, stderrBuffer);
+          console.error('tts.py exited with code', code, {
+            headersSent,
+            audioBytes,
+            stderr: stderrBuffer,
+          });
           if (!headersSent) {
             res.status(500).json({ error: 'TTS generation failed' });
           } else {
@@ -171,6 +188,7 @@ router.post('/', async (req, res) => {
       },
     };
 
+    console.log('Sending text to tts.py for synthesis');
     python.stdin.write(textBuffer);
     python.stdin.end();
   } catch (error) {

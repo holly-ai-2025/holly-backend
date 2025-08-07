@@ -11,9 +11,30 @@ router.use(cors());
 let currentSession = null;
 
 router.post('/', async (req, res) => {
-  const { prompt, stream = true } = req.body;
+  const { prompt } = req.body;
+  const stream = req.body.stream === true;
   if (!prompt) {
     return res.status(400).json({ error: 'Prompt is required' });
+  }
+
+  if (!stream) {
+    try {
+      const response = await fetch('http://localhost:11434/api/generate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model: 'llama3', prompt, stream }),
+      });
+
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`);
+      }
+
+      const data = await response.json();
+      return res.status(200).json({ response: data.response || '' });
+    } catch (error) {
+      console.error('Error querying Llama:', error.message);
+      return res.status(500).json({ error: 'Failed to generate text' });
+    }
   }
 
   // stop any existing session
@@ -62,7 +83,7 @@ router.post('/', async (req, res) => {
       throw new Error(`HTTP error! status: ${response.status}`);
     }
 
-    if (stream && response.body) {
+    if (response.body) {
       for await (const chunk of response.body) {
         const lines = chunk.toString().split('\n').filter(Boolean);
         for (const line of lines) {
@@ -76,9 +97,6 @@ router.post('/', async (req, res) => {
           }
         }
       }
-    } else {
-      const data = await response.json();
-      textBuffer = data.response || '';
     }
 
     python = spawn('python3', [scriptPath, '--stream']);

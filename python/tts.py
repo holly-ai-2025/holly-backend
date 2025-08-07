@@ -14,12 +14,17 @@ prints the absolute file path. Pass ``--stream`` to emit ``audio/mpeg``
 data on stdout for real-time playback.
 """
 
+# NOTE: When ``--stream`` is used, stdout must contain only raw MP3 data.
+# All diagnostic messages should be sent to stderr so they don't corrupt
+# the audio stream.
+
 import argparse
 import json
 import os
 import sys
 import tempfile
 import uuid
+from contextlib import redirect_stdout
 
 import numpy as np
 from TTS.api import TTS
@@ -34,7 +39,8 @@ def load_model() -> TTS:
 
     try:
         sys.stderr.write(f"[tts.py] loading model {MODEL_NAME}\n")
-        tts = TTS(model_name=MODEL_NAME, progress_bar=False, gpu=False)
+        with redirect_stdout(sys.stderr):
+            tts = TTS(model_name=MODEL_NAME, progress_bar=False, gpu=False)
         sys.stderr.write("[tts.py] model loaded\n")
         return tts
     except Exception as exc:
@@ -52,7 +58,8 @@ def synthesize(tts: TTS, text: str, stream: bool) -> None:
 
     try:
         if stream:
-            audio = np.array(tts.tts(text))
+            with redirect_stdout(sys.stderr):
+                audio = np.array(tts.tts(text))
             if audio.size == 0:
                 raise RuntimeError("no audio generated")
             sample_rate = getattr(tts, "sample_rate", 22050)
@@ -89,12 +96,13 @@ def synthesize(tts: TTS, text: str, stream: bool) -> None:
             uid = uuid.uuid4().hex
             wav_path = os.path.join(tmpdir, f"{uid}.wav")
             mp3_path = os.path.join(tmpdir, f"{uid}.mp3")
-            tts.tts_to_file(text=text, file_path=wav_path)
+            with redirect_stdout(sys.stderr):
+                tts.tts_to_file(text=text, file_path=wav_path)
             if not os.path.exists(wav_path) or os.path.getsize(wav_path) == 0:
                 raise RuntimeError("no audio generated")
             AudioSegment.from_wav(wav_path).export(mp3_path, format="mp3")
             os.remove(wav_path)
-            print(mp3_path)
+            print(mp3_path, file=sys.stderr)
             sys.stderr.write(f"[tts.py] wrote MP3 to {mp3_path}\n")
     except Exception as exc:
         sys.stderr.write(f"[tts.py] inference error: {exc}\n")
@@ -113,7 +121,7 @@ def main() -> None:
         synthesize(tts, input_text, args.stream)
     except Exception as exc:
         error = {"error": str(exc)}
-        sys.stdout.write(json.dumps(error) + "\n")
+        sys.stderr.write(json.dumps(error) + "\n")
         sys.exit(1)
 
 

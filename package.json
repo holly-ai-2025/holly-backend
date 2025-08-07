@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "main": "server.js",
   "scripts": {
-    "launch": "bash scripts/launch.sh",
+    "launch": "node launch-dev.js",
     "launch-dev": "node launch-dev.js"
   },
   "dependencies": {

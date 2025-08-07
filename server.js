@@ -3,17 +3,17 @@ const cors = require('cors');
 
 const app = express();
 
-// Enable CORS only from the frontend origin
+// Enable CORS from local frontend dev servers (5173 or 5174)
 app.use(cors({
-  origin: 'http://localhost:5173'
+  origin: ['http://localhost:5173', 'http://localhost:5174']
 }));
 
 // Parse incoming JSON
 app.use(express.json());
 
-// Route for LLaMA endpoint
-const llmRouter = require('./routes/llm.js');
-app.use('/llm', llmRouter);
+// Route for TTS endpoint
+const ttsRouter = require('./routes/tts.js');
+app.use('/tts', ttsRouter);
 
 
 // Start the server

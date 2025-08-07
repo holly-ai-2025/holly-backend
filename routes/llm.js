@@ -27,6 +27,7 @@ router.post('/', async (req, res) => {
   let python = null;
   let headersSent = false;
   let stderrBuffer = '';
+  let audioBytes = 0;
 
   const cleanup = () => {
     if (currentSession && python && currentSession.python === python) {
@@ -82,16 +83,29 @@ router.post('/', async (req, res) => {
 
     python = spawn('python3', [scriptPath, '--stream']);
 
+    const isProbablyMp3 = (chunk) => {
+      return (
+        chunk.slice(0, 3).equals(Buffer.from('ID3')) ||
+        (chunk[0] === 0xff && (chunk[1] & 0xe0) === 0xe0)
+      );
+    };
+
     python.stdout.on('data', (chunk) => {
       if (!headersSent) {
-        res.writeHead(200, {
-          'Content-Type': 'audio/mpeg',
-          'Transfer-Encoding': 'chunked',
-          'Connection': 'keep-alive',
-          'Trailer': 'X-Transcript',
-        });
+        if (!isProbablyMp3(chunk)) {
+          stderrBuffer += 'Invalid MP3 header\n';
+          console.error('Invalid MP3 header');
+          python.kill();
+          return;
+        }
+        res.status(200);
+        res.setHeader('Content-Type', 'audio/mpeg');
+        res.setHeader('Transfer-Encoding', 'chunked');
+        res.setHeader('Connection', 'keep-alive');
+        res.setHeader('Trailer', 'X-Transcript');
         headersSent = true;
       }
+      audioBytes += chunk.length;
       res.write(chunk);
     });
 
@@ -104,12 +118,13 @@ router.post('/', async (req, res) => {
     python.on('close', (code) => {
       cleanup();
       if (!closed) {
-        if (!headersSent) {
+        if (!headersSent || audioBytes === 0 || code !== 0) {
           console.error('tts.py exited with code', code, stderrBuffer);
-          res.status(500).json({ error: 'TTS generation failed' });
-        } else if (code !== 0) {
-          console.error('tts.py exited with code', code, stderrBuffer);
-          res.end();
+          if (!headersSent) {
+            res.status(500).json({ error: 'TTS generation failed' });
+          } else {
+            res.end();
+          }
         } else {
           res.addTrailers({ 'X-Transcript': textBuffer });
           res.end();

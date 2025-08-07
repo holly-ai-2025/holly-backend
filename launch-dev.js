@@ -16,7 +16,11 @@ const backendDir = path.resolve(__dirname);
 process.chdir(backendDir);
 
 function runSync(cmd, args, options = {}) {
-  const result = spawnSync(cmd, args, { stdio: 'inherit', shell: false, ...options });
+  const result = spawnSync(cmd, args, {
+    stdio: 'inherit',
+    shell: process.platform === 'win32',
+    ...options,
+  });
   if (result.status !== 0) {
     process.exit(result.status ?? 1);
   }
@@ -73,7 +77,15 @@ function isPortInUse(port) {
 
 // Spawn a child process and mirror its output in the current terminal
 function run(cmd, args, options = {}) {
-  return spawn(cmd, args, { stdio: 'inherit', shell: false, ...options });
+  try {
+    return spawn(cmd, args, {
+      stdio: 'inherit',
+      shell: process.platform === 'win32',
+      ...options,
+    });
+  } catch (err) {
+    console.error(`Failed to start ${cmd}:`, err.message);
+  }
 }
 
 (async () => {
@@ -107,8 +119,13 @@ function run(cmd, args, options = {}) {
   // Start frontend dev server in ../holly-frontend if port 5173 is free
   if (!(await isPortInUse(5173))) {
     console.log('🚀 Starting frontend dev server...');
-    const frontend = run(npmCmd, ['run', 'dev'], { cwd: path.resolve(__dirname, '../holly-frontend') });
-    processes.push(frontend);
+    const frontendDir = path.resolve(__dirname, '../holly-frontend');
+    if (fs.existsSync(frontendDir)) {
+      const frontend = run(npmCmd, ['run', 'dev'], { cwd: frontendDir });
+      processes.push(frontend);
+    } else {
+      console.log(`⚠️  Frontend directory not found at ${frontendDir}, skipping.`);
+    }
   } else {
     console.log('🔁 Frontend dev server already running on port 5173');
   }

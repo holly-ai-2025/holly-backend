@@ -7,114 +7,96 @@ const path = require('path');
 const router = express.Router();
 router.use(cors());
 
-// Track one TTS session at a time
 let currentSession = null;
 
 router.post('/', async (req, res) => {
   const { prompt, json = false, stream = false } = req.body || {};
-
   console.log('TTS request body', req.body);
 
-  if (!prompt) {
+  if (!prompt || typeof prompt !== 'string' || !prompt.trim()) {
     return res.status(400).json({ error: 'Prompt is required' });
   }
 
-  // Stop any existing session
-  if (currentSession) {
-    try {
-      currentSession.abort();
-    } catch {}
+  // Cancel any in-flight synth
+  if (currentSession?.abort) {
+    try { currentSession.abort(); } catch {}
+    currentSession = null;
   }
 
-  const scriptPath = path.join(__dirname, '..', 'python', 'tts.py');
-  let python = null;
   let headersSent = false;
-  let stderrBuffer = '';
   let audioBytes = 0;
-  const chunks = [];
-  let streamingAudio = false;
+  let stderrBuffer = '';
   let closed = false;
+  let python = null;
 
   const cleanup = () => {
-    if (currentSession && currentSession.python === python) {
-      currentSession = null;
-    }
+    if (currentSession && currentSession.python === python) currentSession = null;
   };
 
-  // Kill only Python if audio started
   req.on('close', () => {
     closed = true;
-    if (streamingAudio && python) {
-      try {
-        python.kill();
-      } catch {}
+    // only kill Python if we started audio (avoid aborting the Ollama fetch mid-flight)
+    if (python) {
+      try { python.kill(); } catch {}
     }
     cleanup();
   });
 
-  let textBuffer = '';
-
+  // 1) Get text from Ollama (non-streaming for reliability)
+  let text = '';
   try {
-    console.log('Fetching from Ollama...');
-    const llamaResp = await fetch('http://localhost:11434/api/generate', {
+    console.log('Fetching from Ollama (stream:false)…');
+    const r = await fetch('http://localhost:11434/api/generate', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        model: 'llama3',
-        prompt,
-        stream: true
-      })
-      // ❌ No abortController.signal here
+      body: JSON.stringify({ model: 'llama3', prompt, stream: false })
     });
 
-    if (!llamaResp.ok) {
-      throw new Error(`HTTP error from Ollama: ${llamaResp.status}`);
+    if (!r.ok) {
+      const body = await r.text().catch(() => '');
+      throw new Error(`Ollama ${r.status} ${r.statusText} body=${body.slice(0,200)}`);
     }
 
-    if (llamaResp.body) {
-      for await (const chunk of llamaResp.body) {
-        const lines = chunk.toString().split('\n').filter(Boolean);
-        for (const line of lines) {
-          try {
-            const parsed = JSON.parse(line);
-            if (parsed.response) {
-              textBuffer += parsed.response;
-            }
-          } catch {
-            continue;
-          }
-        }
-      }
-    }
+    const data = await r.json().catch(() => null);
+    text = (data && typeof data.response === 'string') ? data.response : '';
+    console.log('LLM text length:', text.length);
+  } catch (e) {
+    console.error('Error contacting Ollama:', e.message);
+    return res.status(502).json({ error: 'Upstream LLM error' });
+  }
 
-    console.log('LLM response length for TTS', textBuffer.length);
+  if (json) {
+    return res.status(200).json({ response: text });
+  }
 
-    if (json) {
-      cleanup();
-      return res.status(200).json({ response: textBuffer });
-    }
-
-    console.log('Spawning Python TTS at', scriptPath);
+  // 2) Synthesize speech via python/tts.py
+  try {
+    const scriptPath = path.join(__dirname, '..', 'python', 'tts.py');
+    console.log('Spawning tts.py at', scriptPath, ' stream:', !!stream);
     python = spawn('python3', [scriptPath, '--stream']);
 
-    const isProbablyMp3 = (chunk) =>
-      chunk.slice(0, 3).equals(Buffer.from('ID3')) ||
-      (chunk[0] === 0xff && (chunk[1] & 0xe0) === 0xe0);
+    const isMp3Like = (buf) =>
+      buf.slice(0,3).equals(Buffer.from('ID3')) ||
+      (buf[0] === 0xff && (buf[1] & 0xe0) === 0xe0);
 
-    let firstChunk = true;
+    let first = true;
+    const chunks = [];
 
     python.stdout.on('data', (chunk) => {
-      if (firstChunk) {
-        console.log('First TTS chunk received', {
-          length: chunk.length,
-          firstBytes: chunk.slice(0, 10).toString('hex')
-        });
-        if (!isProbablyMp3(chunk)) {
+      if (first) {
+        first = false;
+        // Validate first audio bytes before sending headers
+        if (!isMp3Like(chunk)) {
           stderrBuffer += 'Invalid MP3 header\n';
-          console.error('Invalid MP3 header', chunk.slice(0, 10).toString('hex'));
-          python.kill();
+          console.error('Invalid MP3 header:', chunk.slice(0,10).toString('hex'));
+          try { python.kill(); } catch {}
+          if (!headersSent) {
+            headersSent = true;
+            return res.status(500).json({ error: 'TTS generation failed (bad audio header)' });
+          }
           return;
         }
+
         res.status(200);
         res.setHeader('Content-Type', 'audio/mpeg');
         if (stream) {
@@ -122,11 +104,9 @@ router.post('/', async (req, res) => {
           res.setHeader('Connection', 'keep-alive');
           res.setHeader('Trailer', 'X-Transcript');
         } else {
-          res.setHeader('Content-Disposition', 'inline; filename="output.mp3"');
+          res.setHeader('Content-Disposition', 'inline; filename="tts.mp3"');
         }
         headersSent = true;
-        streamingAudio = true;
-        firstChunk = false;
       }
 
       audioBytes += chunk.length;
@@ -137,66 +117,55 @@ router.post('/', async (req, res) => {
       }
     });
 
-    python.stderr.on('data', (data) => {
-      const msg = data.toString();
+    python.stderr.on('data', (d) => {
+      const msg = d.toString();
       stderrBuffer += msg;
-      console.error('TTS stderr:', msg);
+      console.error('TTS stderr:', msg.trim());
     });
 
     python.on('close', (code) => {
       cleanup();
-      const success = audioBytes > 0 && code === 0;
-      if (!success) {
-        console.error('tts.py exited with code', code, {
-          headersSent,
-          audioBytes,
-          stderr: stderrBuffer
-        });
-        if (!headersSent) {
-          return res.status(500).json({ error: 'TTS generation failed' });
-        }
+      const ok = code === 0 && audioBytes > 0;
+
+      if (!ok) {
+        console.error('tts.py exited', { code, audioBytes, stderr: stderrBuffer.slice(0,500) });
+        if (!headersSent) return res.status(500).json({ error: 'TTS generation failed' });
         return res.end();
       }
 
       if (stream) {
-        res.addTrailers({ 'X-Transcript': textBuffer });
-        res.end();
+        res.addTrailers?.({ 'X-Transcript': text });
+        return res.end();
       } else {
-        const audioBuffer = Buffer.concat(chunks);
-        res.setHeader('Content-Length', audioBuffer.length);
-        res.setHeader('X-Transcript', textBuffer);
-        res.send(audioBuffer);
+        const buf = Buffer.concat(chunks);
+        res.setHeader('Content-Length', String(buf.length));
+        res.setHeader('X-Transcript', text);
+        return res.end(buf);
       }
     });
 
     python.on('error', (err) => {
       cleanup();
       console.error('Failed to start tts.py:', err.message);
-      if (!headersSent) {
-        res.status(500).json({ error: 'TTS process error' });
-      } else {
-        res.end();
-      }
+      if (!headersSent) return res.status(500).json({ error: 'TTS process error' });
+      res.end();
     });
 
-    // Allow manual abort
     currentSession = {
       python,
-      abort: () => {
-        try {
-          python.kill();
-        } catch {}
-      }
+      abort: () => { try { python.kill(); } catch {} }
     };
-  } catch (err) {
+
+    // Send text for TTS
+    python.stdin.write(text);
+    python.stdin.end();
+  } catch (e) {
     cleanup();
-    console.error('Error in /tts:', err.message);
-    if (!headersSent) {
-      res.status(500).json({ error: err.message });
-    } else {
-      res.end();
-    }
+    console.error('Error in TTS stage:', e.message);
+    if (!headersSent) return res.status(500).json({ error: 'Failed to generate speech' });
+    res.end();
   }
 });
 
 module.exports = router;
+

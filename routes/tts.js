@@ -1,3 +1,4 @@
+// routes/tts.js
 const express = require('express');
 const cors = require('cors');
 const fetch = global.fetch || require('node-fetch');
@@ -5,8 +6,12 @@ const { spawn } = require('child_process');
 const path = require('path');
 
 const router = express.Router();
+// CORS here is fine; you also have global CORS in server.js
 router.use(cors());
 
+const OLLAMA_URL = process.env.OLLAMA_URL || 'http://127.0.0.1:11434';
+
+// Track the current synthesis so we can cancel it on a new request
 let currentSession = null;
 
 router.post('/', async (req, res) => {
@@ -17,36 +22,17 @@ router.post('/', async (req, res) => {
     return res.status(400).json({ error: 'Prompt is required' });
   }
 
-  // Cancel any in-flight synth
+  // Cancel any in-flight synth (don’t abort the Ollama fetch; we haven’t started it yet)
   if (currentSession?.abort) {
     try { currentSession.abort(); } catch {}
     currentSession = null;
   }
 
-  let headersSent = false;
-  let audioBytes = 0;
-  let stderrBuffer = '';
-  let closed = false;
-  let python = null;
-
-  const cleanup = () => {
-    if (currentSession && currentSession.python === python) currentSession = null;
-  };
-
-  req.on('close', () => {
-    closed = true;
-    // only kill Python if we started audio (avoid aborting the Ollama fetch mid-flight)
-    if (python) {
-      try { python.kill(); } catch {}
-    }
-    cleanup();
-  });
-
   // 1) Get text from Ollama (non-streaming for reliability)
   let text = '';
   try {
-    console.log('Fetching from Ollama (stream:false)…');
-    const r = await fetch('http://localhost:11434/api/generate', {
+    console.log('Fetching from Ollama (stream:false)…', OLLAMA_URL);
+    const r = await fetch(`${OLLAMA_URL}/api/generate`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ model: 'llama3', prompt, stream: false })
@@ -54,30 +40,60 @@ router.post('/', async (req, res) => {
 
     if (!r.ok) {
       const body = await r.text().catch(() => '');
-      throw new Error(`Ollama ${r.status} ${r.statusText} body=${body.slice(0,200)}`);
+      console.error('Ollama non-OK:', r.status, r.statusText, body.slice(0,200));
+      return res.status(502).json({ error: `Upstream LLM ${r.status} ${r.statusText}` });
     }
 
-    const data = await r.json().catch(() => null);
-    text = (data && typeof data.response === 'string') ? data.response : '';
+    const data = await r.json().catch(err => {
+      console.error('Ollama parse error:', err);
+      return null;
+    });
+
+    text = (data && typeof data.response === 'string') ? data.response.trim() : '';
     console.log('LLM text length:', text.length);
   } catch (e) {
     console.error('Error contacting Ollama:', e.message);
     return res.status(502).json({ error: 'Upstream LLM error' });
   }
 
+  if (!text) {
+    return res.status(502).json({ error: 'LLM returned empty response' });
+  }
+
+  // Debug/diagnostic mode: just return text
   if (json) {
     return res.status(200).json({ response: text });
   }
 
   // 2) Synthesize speech via python/tts.py
+  let headersSent = false;
+  let audioBytes = 0;
+  let stderrBuffer = '';
+  let python = null;
+  let closed = false;
+
+  const cleanup = () => {
+    if (currentSession && currentSession.python === python) currentSession = null;
+  };
+
+  req.on('close', () => {
+    closed = true;
+    if (python) {
+      try { python.kill(); } catch {}
+    }
+    cleanup();
+  });
+
   try {
     const scriptPath = path.join(__dirname, '..', 'python', 'tts.py');
     console.log('Spawning tts.py at', scriptPath, ' stream:', !!stream);
     python = spawn('python3', [scriptPath, '--stream']);
 
     const isMp3Like = (buf) =>
-      buf.slice(0,3).equals(Buffer.from('ID3')) ||
-      (buf[0] === 0xff && (buf[1] & 0xe0) === 0xe0);
+      buf && buf.length >= 2 && (
+        buf.slice(0,3).equals(Buffer.from('ID3')) ||
+        (buf[0] === 0xff && (buf[1] & 0xe0) === 0xe0)
+      );
 
     let first = true;
     const chunks = [];
@@ -85,6 +101,7 @@ router.post('/', async (req, res) => {
     python.stdout.on('data', (chunk) => {
       if (first) {
         first = false;
+
         // Validate first audio bytes before sending headers
         if (!isMp3Like(chunk)) {
           stderrBuffer += 'Invalid MP3 header\n';
@@ -168,4 +185,3 @@ router.post('/', async (req, res) => {
 });
 
 module.exports = router;
-

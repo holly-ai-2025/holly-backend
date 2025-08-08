@@ -3,14 +3,25 @@ const cors = require('cors');
 
 const app = express();
 
-// CORS: allow localhost dev + your Cloudflare domain
+// reflect any origin; allow common headers/methods
 app.use(cors({
-  origin: [
-    'http://localhost:5173',
-    'http://localhost:5174',
-    'https://api.hollyai.xyz',
-  ],
+  origin: (origin, cb) => cb(null, true),
+  methods: ['GET', 'POST', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+  credentials: false,
 }));
+
+// ensure all preflights succeed
+app.options('*', cors());
+
+app.use((req, res, next) => {
+  const start = Date.now();
+  res.on('finish', () => {
+    const ms = Date.now() - start;
+    console.log(`[${new Date().toISOString()}] ${req.method} ${req.originalUrl} ${res.statusCode} origin=${req.headers.origin || '-'} ${ms}ms`);
+  });
+  next();
+});
 
 app.use(express.json());
 

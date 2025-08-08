@@ -2,6 +2,13 @@
 
 This Node.js/Express backend powers Holly's features such as TTS. It listens on port **3001** and includes a helper script for local and remote development.
 
+## TTS endpoint
+
+`POST /tts` converts text into audio. Provide either `text` (the final reply from the LLM) or `prompt`. If `generate: true` is supplied with a `prompt`, the backend will call Ollama to produce the text before speaking it; otherwise the provided `text`/`prompt` is spoken directly so audio matches the displayed reply. Optional flags:
+
+- `stream` – stream the MP3 as it's produced
+- `json` – return `{ response: "..." }` instead of audio
+
 ## Cloudflare Tunnel
 
 A persistent [Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-apps/) exposes the backend without opening firewall ports.

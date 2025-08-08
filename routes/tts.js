@@ -8,11 +8,47 @@ const router = express.Router();
 let currentSession = null;
 
 router.post('/', async (req, res) => {
-  const { prompt, json = false, stream = false } = req.body || {};
+  const { text, prompt, generate = false, json = false, stream = false } =
+    req.body || {};
   console.log('TTS request body', req.body);
 
-  if (!prompt || typeof prompt !== 'string' || !prompt.trim()) {
-    return res.status(400).json({ error: 'Prompt is required' });
+  let spoken = text;
+
+  if (!spoken && prompt) {
+    if (generate) {
+      try {
+        console.log('Fetching from Ollama...');
+        const r = await fetch('http://localhost:11434/api/generate', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ model: 'llama3', prompt, stream: false })
+        });
+        if (!r.ok) {
+          const body = await r.text().catch(() => '');
+          throw new Error(
+            `Ollama error: ${r.status} ${r.statusText} body=${body.slice(0,200)}`
+          );
+        }
+        const data = await r.json().catch(() => null);
+        spoken =
+          data && typeof data.response === 'string' ? data.response : '';
+        console.log('LLM text length:', spoken.length);
+        if (!spoken) throw new Error('LLM returned empty text');
+      } catch (e) {
+        console.error('Error contacting Ollama:', e.message);
+        return res.status(502).json({ stage: 'ollama', error: e.message });
+      }
+    } else {
+      spoken = prompt;
+    }
+  }
+
+  if (!spoken) {
+    return res.status(400).json({ error: 'Text or prompt is required' });
+  }
+
+  if (json) {
+    return res.status(200).json({ response: spoken });
   }
 
   if (currentSession?.abort) {
@@ -38,35 +74,7 @@ router.post('/', async (req, res) => {
     cleanup();
   });
 
-  // 1) Fetch text from Ollama
-  let text = '';
-  try {
-    console.log('Fetching from Ollama...');
-    const r = await fetch('http://localhost:11434/api/generate', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model: 'llama3', prompt, stream: false })
-    });
-
-    if (!r.ok) {
-      const body = await r.text().catch(() => '');
-      throw new Error(`Ollama error: ${r.status} ${r.statusText} body=${body.slice(0,200)}`);
-    }
-
-    const data = await r.json().catch(() => null);
-    text = (data && typeof data.response === 'string') ? data.response : '';
-    console.log('LLM text length:', text.length);
-    if (!text) throw new Error('LLM returned empty text');
-  } catch (e) {
-    console.error('Error contacting Ollama:', e.message);
-    return res.status(502).json({ stage: 'ollama', error: e.message });
-  }
-
-  if (json) {
-    return res.status(200).json({ response: text });
-  }
-
-  // 2) Python TTS
+  // Python TTS
   try {
     const scriptPath = path.join(__dirname, '..', 'python', 'tts.py');
     console.log('Spawning TTS Python script:', scriptPath, 'stream:', !!stream);
@@ -119,9 +127,9 @@ router.post('/', async (req, res) => {
       if (!ok) {
         console.error('tts.py exited', { code, audioBytes, stderr: stderrBuffer.slice(0,500) });
         if (!headersSent) {
-          return res.status(500).json({ 
-            stage: 'tts', 
-            error: `TTS failed (code=${code}, bytes=${audioBytes})`, 
+          return res.status(500).json({
+            stage: 'tts',
+            error: `TTS failed (code=${code}, bytes=${audioBytes})`,
             stderr: stderrBuffer.slice(0,500)
           });
         }
@@ -129,12 +137,12 @@ router.post('/', async (req, res) => {
       }
 
       if (stream) {
-        res.addTrailers?.({ 'X-Transcript': text });
+        res.addTrailers?.({ 'X-Transcript': spoken });
         return res.end();
       } else {
         const buf = Buffer.concat(chunks);
         res.setHeader('Content-Length', String(buf.length));
-        res.setHeader('X-Transcript', text);
+        res.setHeader('X-Transcript', spoken);
         return res.end(buf);
       }
     });
@@ -149,7 +157,7 @@ router.post('/', async (req, res) => {
     });
 
     currentSession = { python, abort: () => { try { python.kill(); } catch {} } };
-    python.stdin.write(text);
+    python.stdin.write(spoken);
     python.stdin.end();
 
   } catch (e) {

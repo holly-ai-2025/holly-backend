@@ -1,4 +1,3 @@
-// routes/tts.js
 const express = require('express');
 const cors = require('cors');
 const fetch = global.fetch || require('node-fetch');
@@ -8,11 +7,11 @@ const path = require('path');
 const router = express.Router();
 router.use(cors());
 
-// track 1 in-flight TTS session so a new request cancels the old one
+// Track one in-flight TTS session so a new request cancels the old one
 let currentSession = null;
 
 router.post('/', async (req, res) => {
-  // default to streaming MP3; allow ?json=true to return transcript only
+  // Defaults: stream MP3 by default, json=false (mp3 response)
   const { prompt, stream = true, json = false } = req.body || {};
 
   console.log('TTS request body', req.body);
@@ -20,7 +19,7 @@ router.post('/', async (req, res) => {
     return res.status(400).json({ error: 'Prompt is required' });
   }
 
-  // abort any in-flight session
+  // Abort any in-flight session
   if (currentSession?.abort) {
     try { currentSession.abort(); } catch {}
     currentSession = null;
@@ -49,11 +48,10 @@ router.post('/', async (req, res) => {
   });
 
   try {
-    // 1) Get LLM answer as text (NDJSON stream from Ollama)
+    // 1) Get LLM answer as text (Ollama streaming NDJSON)
     const llamaResp = await fetch('http://localhost:11434/api/generate', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      // request streaming so we can accumulate incrementally
       body: JSON.stringify({ model: 'llama3', prompt, stream: true }),
       signal: abortController.signal,
     });
@@ -73,7 +71,7 @@ router.post('/', async (req, res) => {
         }
       }
     } else {
-      // fallback if server responded plain JSON or text
+      // fallback JSON or text body
       try {
         const data = await llamaResp.json();
         if (data?.response) textBuffer = data.response;
@@ -85,13 +83,13 @@ router.post('/', async (req, res) => {
 
     console.log('LLM response length for TTS', textBuffer.length);
 
-    // debugging mode: just return text
+    // Debug mode: return raw text (no audio)
     if (json) {
       cleanup();
       return res.status(200).json({ response: textBuffer });
     }
 
-    // 2) Spawn python TTS and stream MP3
+    // 2) Spawn TTS (writes MP3 to stdout)
     console.log('Spawning tts.py at', scriptPath);
     python = spawn('python3', [scriptPath, '--stream'], { stdio: ['pipe', 'pipe', 'pipe'] });
 
@@ -153,10 +151,11 @@ router.post('/', async (req, res) => {
       }
 
       if (stream) {
-        // add trailer with transcript
+        // add transcript trailer for streaming clients
         res.addTrailers?.({ 'X-Transcript': textBuffer });
         return res.end();
       } else {
+        // buffered response for clients that prefer a single MP3 payload
         const audioBuffer = Buffer.concat(chunks);
         res.status(200);
         res.setHeader('Content-Type', 'audio/mpeg');
@@ -174,7 +173,7 @@ router.post('/', async (req, res) => {
       else res.status(500).json({ error: 'TTS process error' });
     });
 
-    // allow controller to abort
+    // Allow next call to cancel this one
     currentSession = {
       python,
       abort: () => {
@@ -183,7 +182,7 @@ router.post('/', async (req, res) => {
       },
     };
 
-    // send text to TTS stdin
+    // Send text to the TTS engine
     console.log('Sending text to tts.py for synthesis');
     python.stdin.write(textBuffer);
     python.stdin.end();

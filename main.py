@@ -1,10 +1,32 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, UploadFile, File
 from fastapi.responses import StreamingResponse
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+from typing import Optional
 import subprocess
+import tempfile
 from pathlib import Path
+from faster_whisper import WhisperModel
+import os
 
 app = FastAPI()
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+model: Optional[WhisperModel] = None
+
+
+@app.on_event("startup")
+def load_model() -> None:
+    global model
+    model = WhisperModel("small", device="cuda", compute_type="float16")
 
 
 class TTSRequest(BaseModel):
@@ -54,3 +76,39 @@ def tts_endpoint(req: TTSRequest):
     }
 
     return StreamingResponse(iter_audio(), media_type="audio/mpeg", headers=headers)
+
+
+@app.post("/listen")
+async def listen(file: Optional[UploadFile] = File(None)):
+    if file is None:
+        raise HTTPException(status_code=400, detail="No file provided")
+
+    if model is None:
+        raise HTTPException(status_code=500, detail="Model not loaded")
+
+    suffix = Path(file.filename).suffix or ".webm"
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+            data = await file.read()
+            tmp.write(data)
+            tmp_path = tmp.name
+
+        size = len(data)
+        segments, _ = model.transcribe(tmp_path)
+        text = "".join(segment.text for segment in segments).strip()
+        print(f"Transcribed {file.filename} ({size} bytes): {text}")
+    except Exception as exc:
+        print(f"Transcription failed for {file.filename}: {exc}")
+        raise HTTPException(status_code=500, detail="Transcription failed")
+    finally:
+        try:
+            os.remove(tmp_path)
+        except Exception:
+            pass
+
+    return {"text": text}
+
+
+@app.get("/health")
+def health():
+    return {"status": "ok"}

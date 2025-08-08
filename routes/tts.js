@@ -1,11 +1,9 @@
 const express = require('express');
-const cors = require('cors');
 const fetch = global.fetch || require('node-fetch');
 const { spawn } = require('child_process');
 const path = require('path');
 
 const router = express.Router();
-router.use(cors());
 
 let currentSession = null;
 

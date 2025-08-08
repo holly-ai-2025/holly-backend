@@ -3,10 +3,8 @@ const cors = require('cors');
 
 const app = express();
 
-// Enable CORS from local frontend dev servers (5173 or 5174)
-app.use(cors({
-  origin: ['http://localhost:5173', 'http://localhost:5174']
-}));
+// Enable CORS for any requesting origin
+app.use(cors({ origin: true }));
 
 // Parse incoming JSON
 app.use(express.json());
@@ -14,6 +12,11 @@ app.use(express.json());
 // Route for TTS endpoint
 const ttsRouter = require('./routes/tts.js');
 app.use('/tts', ttsRouter);
+
+// Simple health check
+app.get('/health', (req, res) => {
+  res.status(200).json({ ok: true });
+});
 
 
 // Start the server

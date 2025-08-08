@@ -12,34 +12,14 @@ let currentSession = null;
 
 router.post('/', async (req, res) => {
   const { prompt } = req.body;
-  const stream = req.body.stream === true;
+  const json = req.body.json === true;
 
   console.log('TTS request received', {
-    stream,
+    json,
     promptLength: prompt ? prompt.length : 0,
   });
   if (!prompt) {
     return res.status(400).json({ error: 'Prompt is required' });
-  }
-
-  if (!stream) {
-    try {
-      const response = await fetch('http://localhost:11434/api/generate', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ model: 'llama3', prompt, stream }),
-      });
-
-      if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`);
-      }
-
-      const data = await response.json();
-      return res.status(200).json({ response: data.response || '' });
-    } catch (error) {
-      console.error('Error querying Llama:', error.message);
-      return res.status(500).json({ error: 'Failed to generate text' });
-    }
   }
 
   // stop any existing session
@@ -79,7 +59,7 @@ router.post('/', async (req, res) => {
       body: JSON.stringify({
         model: 'llama3',
         prompt,
-        stream,
+        stream: true,
       }),
       signal: abortController.signal,
     });
@@ -105,6 +85,11 @@ router.post('/', async (req, res) => {
     }
 
     console.log('LLM response length for TTS', textBuffer.length);
+
+    if (json) {
+      cleanup();
+      return res.status(200).json({ response: textBuffer });
+    }
 
     console.log('Spawning tts.py at', scriptPath);
 

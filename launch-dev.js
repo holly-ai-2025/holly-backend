@@ -10,7 +10,10 @@ const crypto = require('crypto');
 
 // On Windows the npm executable is npm.cmd
 const npmCmd = process.platform === 'win32' ? 'npm.cmd' : 'npm';
-const cloudflaredPath = '/usr/local/bin/cloudflared';
+
+// Remote Vast.ai host to ensure PM2 services
+const vastHost = process.env.VAST_HOST;
+const vastUser = process.env.VAST_USER || 'root';
 
 // Ensure we're running from the backend directory
 const backendDir = path.resolve(__dirname);
@@ -56,6 +59,29 @@ if (pkgHash !== lastHash) {
 const commitHash = execSync('git rev-parse --short HEAD').toString().trim();
 console.log(`🔖 Current commit: ${commitHash}`);
 
+// Ensure remote PM2 services are running
+function ensureRemoteServices() {
+  if (!vastHost) {
+    console.log('⚠️  VAST_HOST not set; skipping remote service check.');
+    return;
+  }
+  const remote = `${vastUser}@${vastHost}`;
+  const cmd = [
+    'pm2 describe holly-backend || pm2 start /root/holly-backend/server.js --name holly-backend',
+    'pm2 describe ollama || pm2 start "OLLAMA_HOST=0.0.0.0:11434 /usr/local/bin/ollama serve" --name ollama',
+    'pm2 describe cloudflared || pm2 start cloudflared --name cloudflared -- tunnel run holly-backend',
+    'pm2 save'
+  ].join(' && ');
+  try {
+    console.log('🔐 Ensuring remote services via PM2...');
+    runSync('ssh', [remote, cmd]);
+  } catch (err) {
+    console.error('Failed to ensure remote services:', err.message);
+  }
+}
+
+ensureRemoteServices();
+
 // Utility to check if a TCP port is already in use
 function isPortInUse(port) {
   return new Promise((resolve) => {
@@ -81,23 +107,6 @@ function run(cmd, args, options = {}) {
 
 (async () => {
   const processes = [];
-
-  // Start backend server (server.js) if port 3001 is free
-  if (!(await isPortInUse(3001))) {
-    console.log('🚀 Starting backend server...');
-    const backend = run('node', ['server.js']);
-    processes.push(backend);
-  } else {
-    console.log('🔁 Backend server already running on port 3001');
-  }
-
-  // Start Cloudflare tunnel to expose the backend
-  console.log('🚇 Starting Cloudflare tunnel...');
-  const tunnelConfig = path.join(__dirname, '.cloudflared', 'config.yml');
-  const tunnel = run(cloudflaredPath, ['tunnel', '--config', tunnelConfig, 'run', 'holly-backend']);
-  if (tunnel) {
-    processes.push(tunnel);
-  }
 
   // Start frontend dev server in ../holly-frontend if port 5173 is free
   if (!(await isPortInUse(5173))) {

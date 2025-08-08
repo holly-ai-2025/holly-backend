@@ -14,6 +14,8 @@ router.post('/', async (req, res) => {
   const { prompt } = req.body;
   const json = req.body.json === true;
 
+  // Log entire request body to help debug unexpected fields
+  console.log('TTS request body', req.body);
   console.log('TTS request received', {
     json,
     promptLength: prompt ? prompt.length : 0,

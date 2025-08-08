@@ -133,40 +133,39 @@ router.get('/selftest-json', async (req, res) => {
   }
 });
 
-// GET /tts/selftest-text -> synthesize "hello from holly" and stream PCM
+// GET /tts/selftest-text -> synthesize "This is Holly self-test" and return WAV
 router.get('/selftest-text', async (req, res) => {
   try {
-    const r = await fetch('http://127.0.0.1:5002/speak', {
+    const upstreamUrl =
+      process.env.TTS_SELFTEST_URL ||
+      process.env.TTS_SERVER_URL ||
+      'http://127.0.0.1:5002/speak';
+
+    const r = await fetch(upstreamUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text: 'hello from holly' }),
+      body: JSON.stringify({ text: 'This is Holly self-test' }),
     });
 
     if (!r.ok) {
       const txt = await r.text().catch(() => '');
       return res.status(500).json({
-        stage: 'tts-upstream',
-        status: r.status,
-        error: txt.slice(0, 200),
+        ok: false,
+        error: txt.slice(0, 200) || `status ${r.status}`,
       });
     }
 
+    const audioBuffer = Buffer.from(await r.arrayBuffer());
     res.status(200);
+    res.setHeader('Content-Type', 'audio/wav');
     res.setHeader(
-      'Content-Type',
-      r.headers.get('content-type') || 'application/octet-stream'
+      'Content-Disposition',
+      'inline; filename="selftest.wav"'
     );
-    res.setHeader(
-      'Cache-Control',
-      r.headers.get('cache-control') || 'no-store'
-    );
-    const conn = r.headers.get('connection');
-    if (conn) res.setHeader('Connection', conn);
-    res.setHeader('Transfer-Encoding', 'chunked');
-    if (r.body.pipe) r.body.pipe(res);
-    else Readable.from(r.body).pipe(res);
+    res.setHeader('Content-Length', String(audioBuffer.length));
+    res.send(audioBuffer);
   } catch (e) {
-    return res.status(500).json({ stage: 'tts', error: e.message });
+    res.status(500).json({ ok: false, error: e.message });
   }
 });
 

@@ -1,19 +1,28 @@
 const express = require('express');
 const fetch = global.fetch || require('node-fetch');
-const { spawn } = require('child_process');
-const path = require('path');
+const { Readable } = require('stream');
 
 const router = express.Router();
 
-let currentSession = null;
-
+// POST /tts
+// Body: { text?, prompt?, generate=false, json=false, stream=false }
+// - if json=true returns {response:text}
+// - text skips LLM and proxies directly to FastAPI
+// - prompt with generate=true will call Ollama once to create text
 router.post('/', async (req, res) => {
-  const { text, prompt, generate = false, json = false, stream = false } =
-    req.body || {};
+  const {
+    text,
+    prompt,
+    generate = false,
+    json = false,
+    stream = false,
+  } = req.body || {};
+
   console.log('TTS request body', req.body);
 
   let spoken = text;
 
+  // Optionally generate text via Ollama
   if (!spoken && prompt) {
     if (generate) {
       try {
@@ -21,7 +30,7 @@ router.post('/', async (req, res) => {
         const r = await fetch('http://localhost:11434/api/generate', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ model: 'llama3', prompt, stream: false })
+          body: JSON.stringify({ model: 'llama3', prompt, stream: false }),
         });
         if (!r.ok) {
           const body = await r.text().catch(() => '');
@@ -30,8 +39,7 @@ router.post('/', async (req, res) => {
           );
         }
         const data = await r.json().catch(() => null);
-        spoken =
-          data && typeof data.response === 'string' ? data.response : '';
+        spoken = data && typeof data.response === 'string' ? data.response : '';
         console.log('LLM text length:', spoken.length);
         if (!spoken) throw new Error('LLM returned empty text');
       } catch (e) {
@@ -51,123 +59,103 @@ router.post('/', async (req, res) => {
     return res.status(200).json({ response: spoken });
   }
 
-  if (currentSession?.abort) {
-    try { currentSession.abort(); } catch {}
-    currentSession = null;
-  }
+  // Proxy to FastAPI TTS server
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 15000);
 
-  let headersSent = false;
-  let audioBytes = 0;
-  let stderrBuffer = '';
-  let closed = false;
-  let python = null;
-
-  const cleanup = () => {
-    if (currentSession && currentSession.python === python) currentSession = null;
-  };
-
-  req.on('close', () => {
-    closed = true;
-    if (python) {
-      try { python.kill(); } catch {}
-    }
-    cleanup();
-  });
-
-  // Python TTS
   try {
-    const scriptPath = path.join(__dirname, '..', 'python', 'tts.py');
-    console.log('Spawning TTS Python script:', scriptPath, 'stream:', !!stream);
-    python = spawn('python3', [scriptPath, '--stream']);
-
-    const isMp3Like = (buf) =>
-      buf.slice(0,3).equals(Buffer.from('ID3')) ||
-      (buf[0] === 0xff && (buf[1] & 0xe0) === 0xe0);
-
-    let first = true;
-    const chunks = [];
-
-    python.stdout.on('data', (chunk) => {
-      if (first) {
-        first = false;
-        if (!isMp3Like(chunk)) {
-          stderrBuffer += 'Invalid MP3 header\n';
-          console.error('Invalid MP3 header:', chunk.slice(0,10).toString('hex'));
-          try { python.kill(); } catch {}
-          if (!headersSent) {
-            headersSent = true;
-            return res.status(500).json({ stage: 'tts', error: 'Bad MP3 header from Python TTS' });
-          }
-          return;
-        }
-        res.status(200).setHeader('Content-Type', 'audio/mpeg');
-        if (stream) {
-          res.setHeader('Transfer-Encoding', 'chunked');
-          res.setHeader('Trailer', 'X-Transcript');
-        } else {
-          res.setHeader('Content-Disposition', 'inline; filename="tts.mp3"');
-        }
-        headersSent = true;
-      }
-
-      audioBytes += chunk.length;
-      if (stream) res.write(chunk);
-      else chunks.push(chunk);
+    const upstream = await fetch('http://127.0.0.1:5002/speak', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text: spoken }),
+      signal: controller.signal,
     });
+    clearTimeout(timeout);
 
-    python.stderr.on('data', (d) => {
-      const msg = d.toString();
-      stderrBuffer += msg;
-      console.error('TTS stderr:', msg.trim());
-    });
-
-    python.on('close', (code) => {
-      cleanup();
-      const ok = code === 0 && audioBytes > 0;
-      if (!ok) {
-        console.error('tts.py exited', { code, audioBytes, stderr: stderrBuffer.slice(0,500) });
-        if (!headersSent) {
-          return res.status(500).json({
-            stage: 'tts',
-            error: `TTS failed (code=${code}, bytes=${audioBytes})`,
-            stderr: stderrBuffer.slice(0,500)
-          });
-        }
-        return res.end();
-      }
-
-      if (stream) {
-        res.addTrailers?.({ 'X-Transcript': spoken });
-        return res.end();
-      } else {
-        const buf = Buffer.concat(chunks);
-        res.setHeader('Content-Length', String(buf.length));
-        res.setHeader('X-Transcript', spoken);
-        return res.end(buf);
-      }
-    });
-
-    python.on('error', (err) => {
-      cleanup();
-      console.error('Failed to start tts.py:', err.message);
-      if (!headersSent) {
-        return res.status(500).json({ stage: 'tts', error: err.message });
-      }
-      res.end();
-    });
-
-    currentSession = { python, abort: () => { try { python.kill(); } catch {} } };
-    python.stdin.write(spoken);
-    python.stdin.end();
-
-  } catch (e) {
-    cleanup();
-    console.error('Error in TTS stage:', e.message);
-    if (!headersSent) {
-      return res.status(500).json({ stage: 'tts', error: e.message });
+    if (!upstream.ok) {
+      const errText = await upstream.text().catch(() => '');
+      return res.status(500).json({
+        stage: 'tts-upstream',
+        status: upstream.status,
+        error: errText.slice(0, 200),
+      });
     }
-    res.end();
+
+    res.status(200);
+    res.setHeader(
+      'Content-Type',
+      upstream.headers.get('content-type') || 'application/octet-stream'
+    );
+    res.setHeader('Cache-Control', 'no-store');
+    res.setHeader('X-Transcript', spoken);
+
+    if (stream) {
+      res.setHeader('Transfer-Encoding', 'chunked');
+      if (upstream.body.pipe) upstream.body.pipe(res);
+      else Readable.from(upstream.body).pipe(res);
+    } else {
+      const buffer = Buffer.from(await upstream.arrayBuffer());
+      res.setHeader('Content-Length', String(buffer.length));
+      res.end(buffer);
+    }
+  } catch (e) {
+    const msg = e.name === 'AbortError' ? 'timeout' : e.message;
+    console.error('Error in TTS stage:', msg);
+    return res
+      .status(500)
+      .json({ stage: 'tts', error: msg, code: null, signal: null });
+  }
+});
+
+// GET /tts/selftest-json -> verifies FastAPI is alive
+router.get('/selftest-json', async (req, res) => {
+  try {
+    const r = await fetch('http://127.0.0.1:5002/health');
+    if (r.ok) {
+      return res.json({ ok: true });
+    }
+    const body = await r.text().catch(() => '');
+    return res.status(500).json({
+      ok: false,
+      status: r.status,
+      error: body.slice(0, 200),
+    });
+  } catch (e) {
+    return res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+// GET /tts/selftest-text -> synthesize "hello from holly" and stream PCM
+router.get('/selftest-text', async (req, res) => {
+  try {
+    const r = await fetch('http://127.0.0.1:5002/speak', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text: 'hello from holly' }),
+    });
+
+    if (!r.ok) {
+      const txt = await r.text().catch(() => '');
+      return res.status(500).json({
+        stage: 'tts-upstream',
+        status: r.status,
+        error: txt.slice(0, 200),
+      });
+    }
+
+    res.status(200);
+    res.setHeader(
+      'Content-Type',
+      r.headers.get('content-type') || 'application/octet-stream'
+    );
+    res.setHeader('Transfer-Encoding', 'chunked');
+    res.setHeader('Cache-Control', 'no-store');
+    if (r.body.pipe) r.body.pipe(res);
+    else Readable.from(r.body).pipe(res);
+  } catch (e) {
+    return res.status(500).json({ stage: 'tts', error: e.message });
   }
 });
 
 module.exports = router;
+

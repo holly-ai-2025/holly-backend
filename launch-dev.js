@@ -14,6 +14,7 @@ const npmCmd = process.platform === 'win32' ? 'npm.cmd' : 'npm';
 // Remote Vast.ai host to ensure PM2 services
 const vastHost = process.env.VAST_HOST;
 const vastUser = process.env.VAST_USER || 'root';
+const vastPort = process.env.VAST_PORT || '22';
 
 // Ensure we're running from the backend directory
 const backendDir = path.resolve(__dirname);
@@ -59,28 +60,37 @@ if (pkgHash !== lastHash) {
 const commitHash = execSync('git rev-parse --short HEAD').toString().trim();
 console.log(`🔖 Current commit: ${commitHash}`);
 
-// Ensure remote PM2 services are running
-function ensureRemoteServices() {
+// Update remote backend and ensure PM2 services are running
+function updateRemote() {
   if (!vastHost) {
-    console.log('⚠️  VAST_HOST not set; skipping remote service check.');
+    console.log('⚠️  VAST_HOST not set; skipping remote update.');
     return;
   }
-  const remote = `${vastUser}@${vastHost}`;
-  const cmd = [
-    'pm2 describe holly-backend || pm2 start /root/holly-backend/server.js --name holly-backend',
-    'pm2 describe ollama || pm2 start "OLLAMA_HOST=0.0.0.0:11434 /usr/local/bin/ollama serve" --name ollama',
-    'pm2 describe cloudflared || pm2 start cloudflared --name cloudflared -- tunnel run holly-backend',
+  const remoteCmd = [
+    'cd /root/holly-backend',
+    'git fetch origin main',
+    'git reset --hard origin/main',
+    '(npm ci --omit=dev || npm install)',
+    '(pm2 describe holly-backend || pm2 start /root/holly-backend/server.js --name holly-backend)',
+    '(pm2 describe ollama || pm2 start "OLLAMA_HOST=0.0.0.0:11434 /usr/local/bin/ollama serve" --name ollama)',
+    '(pm2 describe cloudflared || pm2 start cloudflared --name cloudflared -- tunnel run holly-backend)',
     'pm2 save'
   ].join(' && ');
-  try {
-    console.log('🔐 Ensuring remote services via PM2...');
-    runSync('ssh', [remote, cmd]);
-  } catch (err) {
-    console.error('Failed to ensure remote services:', err.message);
+
+  console.log('🔐 Updating remote...');
+  const result = spawnSync('ssh', ['-p', vastPort, `${vastUser}@${vastHost}`, remoteCmd], {
+    stdio: 'inherit',
+    shell: process.platform === 'win32',
+  });
+
+  if (result.status === 0) {
+    console.log('✅ Remote updated');
+  } else {
+    console.error(`❌ Remote update failed (code ${result.status})`);
   }
 }
 
-ensureRemoteServices();
+updateRemote();
 
 // Utility to check if a TCP port is already in use
 function isPortInUse(port) {

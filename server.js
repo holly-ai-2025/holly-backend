@@ -3,23 +3,26 @@ const cors = require('cors');
 
 const app = express();
 
-// Enable CORS for any requesting origin
-app.use(cors({ origin: true }));
+// CORS: allow localhost dev + your Cloudflare domain
+app.use(cors({
+  origin: [
+    'http://localhost:5173',
+    'http://localhost:5174',
+    'https://api.hollyai.xyz',
+  ],
+}));
 
-// Parse incoming JSON
 app.use(express.json());
 
-// Route for TTS endpoint
-const ttsRouter = require('./routes/tts.js');
-app.use('/tts', ttsRouter);
+// TTS route
+app.use('/tts', require('./routes/tts'));
 
-// Simple health check
-app.get('/health', (req, res) => {
-  res.status(200).json({ ok: true });
-});
+// Healthcheck
+app.get('/health', (req, res) => res.status(200).json({ ok: true }));
 
+// Optional: plain 404 for everything else
+app.use((req, res) => res.status(404).json({ error: 'Not found' }));
 
-// Start the server
 const PORT = 3001;
 app.listen(PORT, () => {
   console.log(`✅ Holly backend running on http://localhost:${PORT}`);

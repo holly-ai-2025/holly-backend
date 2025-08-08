@@ -86,7 +86,12 @@ router.post('/', async (req, res) => {
       'Content-Type',
       upstream.headers.get('content-type') || 'application/octet-stream'
     );
-    res.setHeader('Cache-Control', 'no-store');
+    res.setHeader(
+      'Cache-Control',
+      upstream.headers.get('cache-control') || 'no-store'
+    );
+    const conn = upstream.headers.get('connection');
+    if (conn) res.setHeader('Connection', conn);
     res.setHeader('X-Transcript', spoken);
 
     if (stream) {
@@ -95,7 +100,10 @@ router.post('/', async (req, res) => {
       else Readable.from(upstream.body).pipe(res);
     } else {
       const buffer = Buffer.from(await upstream.arrayBuffer());
-      res.setHeader('Content-Length', String(buffer.length));
+      res.setHeader(
+        'Content-Length',
+        upstream.headers.get('content-length') || String(buffer.length)
+      );
       res.end(buffer);
     }
   } catch (e) {
@@ -148,8 +156,13 @@ router.get('/selftest-text', async (req, res) => {
       'Content-Type',
       r.headers.get('content-type') || 'application/octet-stream'
     );
+    res.setHeader(
+      'Cache-Control',
+      r.headers.get('cache-control') || 'no-store'
+    );
+    const conn = r.headers.get('connection');
+    if (conn) res.setHeader('Connection', conn);
     res.setHeader('Transfer-Encoding', 'chunked');
-    res.setHeader('Cache-Control', 'no-store');
     if (r.body.pipe) r.body.pipe(res);
     else Readable.from(r.body).pipe(res);
   } catch (e) {

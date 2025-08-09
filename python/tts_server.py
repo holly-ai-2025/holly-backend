@@ -3,8 +3,10 @@ import wave
 import logging
 import os
 import time
+import struct
+import re
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import Response, JSONResponse
+from fastapi.responses import Response, JSONResponse, StreamingResponse
 from pydantic import BaseModel
 import numpy as np
 
@@ -95,8 +97,17 @@ app = FastAPI()
 
 
 class SpeakRequest(BaseModel):
+    """Request payload for /speak.
+
+    Setting ``stream`` to ``True`` enables chunked audio output which starts
+    sending a WAV header followed by PCM data as soon as each text chunk is
+    synthesized.  When omitted or ``False`` the entire WAV is returned once
+    synthesis completes, preserving the legacy behaviour.
+    """
+
     text: str
     sample_rate: int | None = None
+    stream: bool | None = False
 
 
 def synthesize(text: str) -> np.ndarray:
@@ -144,6 +155,48 @@ def float32_to_wav_bytes(wav_f32: np.ndarray, sr: int) -> tuple[bytes, int]:
     return bio.getvalue(), len(pcm)
 
 
+def float32_to_pcm_bytes(wav_f32: np.ndarray) -> bytes:
+    return (np.clip(wav_f32, -1.0, 1.0) * 32767).astype(np.int16).tobytes()
+
+
+def wav_header(sr: int) -> bytes:
+    """Return a simple WAV header with unknown data length."""
+    byte_rate = sr * 2
+    block_align = 2
+    # Set data sizes to zero so playback can start immediately while streaming
+    return struct.pack(
+        "<4sI4s4sIHHIIHH4sI",
+        b"RIFF",
+        36,
+        b"WAVE",
+        b"fmt ",
+        16,
+        1,
+        1,
+        sr,
+        byte_rate,
+        block_align,
+        16,
+        b"data",
+        0,
+    )
+
+
+def chunk_text(text: str, limit: int = 200) -> list[str]:
+    sentences = re.split(r"(?<=[.!?])\s+", text)
+    chunks: list[str] = []
+    current = ""
+    for sentence in sentences:
+        if current and len(current) + len(sentence) + 1 > limit:
+            chunks.append(current.strip())
+            current = sentence
+        else:
+            current = f"{current} {sentence}".strip()
+    if current.strip():
+        chunks.append(current.strip())
+    return chunks
+
+
 @app.post("/speak")
 def speak(req: SpeakRequest):
     text = (req.text or "").strip()
@@ -153,13 +206,41 @@ def speak(req: SpeakRequest):
     long_text = len(text) > 320
     if long_text:
         logger.info("long_text chars=%s", len(text))
+    stream = bool(req.stream)
     try:
+        if stream:
+            chunks = chunk_text(text)
+            logger.info("streaming chunks=%s", len(chunks))
+
+            def pcm_stream():
+                header_sent = False
+                for part in chunks:
+                    synth_start = time.perf_counter()
+                    wav = synthesize(part)
+                    synth_ms = int((time.perf_counter() - synth_start) * 1000)
+                    logger.info("chunk_synth_ms=%s device=%s", synth_ms, tts.device)
+                    pcm = float32_to_pcm_bytes(wav)
+                    if not header_sent:
+                        header_sent = True
+                        yield wav_header(sr)
+                    step = 16384
+                    for i in range(0, len(pcm), step):
+                        yield pcm[i : i + step]
+
+            return StreamingResponse(
+                pcm_stream(),
+                media_type="audio/wav",
+                headers={"Cache-Control": "no-store"},
+            )
+
         synth_start = time.perf_counter()
         wav = synthesize(text)
         synth_ms = int((time.perf_counter() - synth_start) * 1000)
         data, _ = float32_to_wav_bytes(wav, sr)
         logger.info("synth_ms=%s device=%s", synth_ms, tts.device)
-        return Response(content=data, media_type="audio/wav", headers={"Cache-Control": "no-store"})
+        return Response(
+            content=data, media_type="audio/wav", headers={"Cache-Control": "no-store"}
+        )
     except Exception as ex:  # pragma: no cover
         raise HTTPException(status_code=500, detail=str(ex))
 

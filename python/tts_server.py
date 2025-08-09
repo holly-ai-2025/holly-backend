@@ -3,6 +3,7 @@ import wave
 import logging
 import os
 import time
+import asyncio
 import struct
 import re
 from fastapi import FastAPI, HTTPException
@@ -159,27 +160,34 @@ def float32_to_pcm_bytes(wav_f32: np.ndarray) -> bytes:
     return (np.clip(wav_f32, -1.0, 1.0) * 32767).astype(np.int16).tobytes()
 
 
-def wav_header(sr: int) -> bytes:
-    """Return a simple WAV header with unknown data length."""
-    byte_rate = sr * 2
-    block_align = 2
-    # Set data sizes to zero so playback can start immediately while streaming
-    return struct.pack(
-        "<4sI4s4sIHHIIHH4sI",
-        b"RIFF",
-        36,
-        b"WAVE",
-        b"fmt ",
-        16,
-        1,
-        1,
-        sr,
-        byte_rate,
-        block_align,
-        16,
-        b"data",
-        0,
+def make_wav_header(data_len: int, sample_rate: int = 24000,
+                    channels: int = 1, bits_per_sample: int = 16) -> bytes:
+    """Return a standard 44-byte PCM WAV header for this chunk."""
+    byte_rate = sample_rate * channels * bits_per_sample // 8
+    block_align = channels * bits_per_sample // 8
+    riff_chunk_size = 36 + data_len
+    return (
+        b"RIFF" +
+        struct.pack("<I", riff_chunk_size) +
+        b"WAVE" +
+        b"fmt " +
+        struct.pack("<IHHIIHH",
+                    16,        # Subchunk1Size (PCM)
+                    1,         # AudioFormat = PCM
+                    channels,
+                    sample_rate,
+                    byte_rate,
+                    block_align,
+                    bits_per_sample) +
+        b"data" +
+        struct.pack("<I", data_len)
     )
+
+
+async def synthesize_chunk_to_pcm(text: str, sample_rate: int = DEFAULT_SR) -> tuple[bytes, int]:
+    wav = await asyncio.to_thread(synthesize, text)
+    pcm = float32_to_pcm_bytes(wav)
+    return pcm, sample_rate
 
 
 def chunk_text(text: str, limit: int = 200) -> list[str]:
@@ -212,25 +220,26 @@ def speak(req: SpeakRequest):
             chunks = chunk_text(text)
             logger.info("streaming chunks=%s", len(chunks))
 
-            def pcm_stream():
-                header_sent = False
+            async def gen():
                 for part in chunks:
                     synth_start = time.perf_counter()
-                    wav = synthesize(part)
+                    pcm, sr_used = await synthesize_chunk_to_pcm(part, sr)
                     synth_ms = int((time.perf_counter() - synth_start) * 1000)
                     logger.info("chunk_synth_ms=%s device=%s", synth_ms, tts.device)
-                    pcm = float32_to_pcm_bytes(wav)
-                    if not header_sent:
-                        header_sent = True
-                        yield wav_header(sr)
-                    step = 16384
-                    for i in range(0, len(pcm), step):
-                        yield pcm[i : i + step]
+                    header = make_wav_header(len(pcm), sample_rate=sr_used,
+                                              channels=1, bits_per_sample=16)
+                    frame = header + pcm
+                    yield struct.pack(">I", len(frame))
+                    yield frame
+                    await asyncio.sleep(0)
 
             return StreamingResponse(
-                pcm_stream(),
-                media_type="audio/wav",
-                headers={"Cache-Control": "no-store"},
+                gen(),
+                media_type="application/octet-stream",
+                headers={
+                    "Cache-Control": "no-store",
+                    "X-Stream-Framing": "wav-l32be",
+                },
             )
 
         synth_start = time.perf_counter()

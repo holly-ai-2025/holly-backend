@@ -148,6 +148,8 @@ router.post('/', async (req, res) => {
     upstream.headers.get('content-type') || 'application/octet-stream'
   );
   res.setHeader('Cache-Control', upstream.headers.get('cache-control') || 'no-store');
+  const framing = upstream.headers.get('x-stream-framing');
+  if (framing) res.setHeader('X-Stream-Framing', framing);
 
   if (stream) {
     // Streaming audio only — do NOT set X-Transcript in streaming mode.

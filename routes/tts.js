@@ -9,10 +9,10 @@ const TTS_TIMEOUT_MS = parseInt(process.env.TTS_TIMEOUT_MS || '60000', 10);
 
 // POST /tts
 // Body: { text?, prompt?, generate=false, json=false, stream=false }
-// - if json=true returns {response:text}
+// - if json=true returns {response:text} (no audio)
 // - text skips LLM and proxies directly to FastAPI
 // - prompt with generate=true will call Ollama once to create text
-// - stream=true proxies chunked audio as it is produced
+// - stream=true proxies chunked audio as it is produced (NO transcript headers)
 router.post('/', async (req, res) => {
   const {
     text,
@@ -39,7 +39,7 @@ router.post('/', async (req, res) => {
         if (!r.ok) {
           const body = await r.text().catch(() => '');
           throw new Error(
-            `Ollama error: ${r.status} ${r.statusText} body=${body.slice(0,200)}`
+            `Ollama error: ${r.status} ${r.statusText} body=${body.slice(0, 200)}`
           );
         }
         const data = await r.json().catch(() => null);
@@ -59,22 +59,19 @@ router.post('/', async (req, res) => {
     return res.status(400).json({ error: 'Text or prompt is required' });
   }
 
+  // STEP 1 path: return JSON transcript only (frontend shows text immediately)
   if (json) {
+    // Do not try to send transcript in headers; plain JSON only.
     return res.status(200).json({ response: spoken });
   }
 
+  // Cap excessively long inputs (also helps with latency)
   if (spoken.length > TTS_TEXT_MAX_CHARS) {
     console.warn(
       `Truncating TTS text from ${spoken.length} to ${TTS_TEXT_MAX_CHARS}`
     );
     spoken = spoken.slice(0, TTS_TEXT_MAX_CHARS) + '…';
   }
-
-  // Avoid illegal header characters by stripping newlines and URI encoding.
-  const sanitizedTranscript = encodeURIComponent(
-    spoken.replace(/[\r\n]+/g, ' ')
-  );
-  const canSendTranscript = sanitizedTranscript.length <= 800;
 
   const start = Date.now();
 
@@ -114,26 +111,22 @@ router.post('/', async (req, res) => {
             .json({ stage: 'tts', error: 'timeout', elapsedMs });
         }
         console.error('Error contacting TTS upstream:', e.message);
-        return res
-          .status(500)
-          .json({
-            stage: 'tts-upstream',
-            status: null,
-            error: e.message.slice(0, 512),
-            elapsedMs,
-          });
+        return res.status(500).json({
+          stage: 'tts-upstream',
+          status: null,
+          error: e.message.slice(0, 512),
+          elapsedMs,
+        });
       }
     } else {
       const elapsedMs = Date.now() - start;
       console.error('Error contacting TTS upstream:', err.message);
-      return res
-        .status(500)
-        .json({
-          stage: 'tts-upstream',
-          status: null,
-          error: err.message.slice(0, 512),
-          elapsedMs,
-        });
+      return res.status(500).json({
+        stage: 'tts-upstream',
+        status: null,
+        error: err.message.slice(0, 512),
+        elapsedMs,
+      });
     }
   }
 
@@ -148,30 +141,30 @@ router.post('/', async (req, res) => {
     });
   }
 
+  // Common response headers (no transcript headers at all)
   res.status(200);
   res.setHeader(
     'Content-Type',
     upstream.headers.get('content-type') || 'application/octet-stream'
   );
-  res.setHeader(
-    'Cache-Control',
-    upstream.headers.get('cache-control') || 'no-store'
-  );
-  const conn = upstream.headers.get('connection');
-  if (conn) res.setHeader('Connection', conn);
-  if (canSendTranscript) {
-    res.setHeader('X-Transcript', sanitizedTranscript);
-  }
+  res.setHeader('Cache-Control', upstream.headers.get('cache-control') || 'no-store');
 
   if (stream) {
-    res.setHeader('Transfer-Encoding', 'chunked');
+    // Streaming audio only — do NOT set X-Transcript in streaming mode.
+    // (Avoids "Invalid character in header content" & proxy buffer issues.)
+    // Let Node set Transfer-Encoding: chunked automatically when piping.
     const src = upstream.body.pipe ? upstream.body : Readable.from(upstream.body);
     src.pipe(res);
     src.on('end', () => {
       const elapsedMs = Date.now() - start;
       console.log(`TTS elapsedMs ${elapsedMs}`);
     });
+    src.on('error', (e) => {
+      console.error('Stream error from upstream:', e.message);
+      try { res.end(); } catch (_) {}
+    });
   } else {
+    // Non-streaming: return full audio buffer
     const buffer = Buffer.from(await upstream.arrayBuffer());
     res.setHeader(
       'Content-Length',
@@ -226,10 +219,7 @@ router.get('/selftest-text', async (req, res) => {
     const audioBuffer = Buffer.from(await r.arrayBuffer());
     res.status(200);
     res.setHeader('Content-Type', 'audio/wav');
-    res.setHeader(
-      'Content-Disposition',
-      'inline; filename="selftest.wav"'
-    );
+    res.setHeader('Content-Disposition', 'inline; filename="selftest.wav"');
     res.setHeader('Content-Length', String(audioBuffer.length));
     res.send(audioBuffer);
   } catch (e) {
@@ -238,4 +228,3 @@ router.get('/selftest-text', async (req, res) => {
 });
 
 module.exports = router;
-

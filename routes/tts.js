@@ -7,8 +7,16 @@ const router = express.Router();
 const TTS_TEXT_MAX_CHARS = parseInt(process.env.TTS_TEXT_MAX_CHARS || '600', 10);
 const TTS_TIMEOUT_MS = parseInt(process.env.TTS_TIMEOUT_MS || '60000', 10);
 
+// Helper: normalize & clamp speed param
+function normalizeSpeed(raw) {
+  if (raw === undefined || raw === null || raw === '') return undefined;
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return undefined;
+  return Math.min(2.0, Math.max(0.5, n));
+}
+
 // POST /tts
-// Body: { text?, prompt?, generate=false, json=false, stream=false }
+// Body: { text?, prompt?, generate=false, json=false, stream=false, speed? }
 // - if json=true returns {response:text} (no audio)
 // - text skips LLM and proxies directly to FastAPI
 // - prompt with generate=true will call Ollama once to create text
@@ -20,9 +28,20 @@ router.post('/', async (req, res) => {
     generate = false,
     json = false,
     stream = false,
+    sample_rate,
   } = req.body || {};
 
-  console.log('TTS request body', req.body);
+  // Optional tempo override (or use env TTS_SPEED as a default hint)
+  const requestedSpeed =
+    normalizeSpeed(req.body?.speed) ??
+    normalizeSpeed(process.env.TTS_SPEED);
+
+  console.log('TTS request body', {
+    ...req.body,
+    // avoid logging huge text
+    text: text ? `${String(text).slice(0, 64)}…(${String(text).length})` : undefined,
+    prompt: prompt ? `${String(prompt).slice(0, 64)}…(${String(prompt).length})` : undefined,
+  });
 
   let spoken = text;
 
@@ -79,11 +98,18 @@ router.post('/', async (req, res) => {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), TTS_TIMEOUT_MS);
     try {
-      // Forward "stream" flag so FastAPI returns framed stream when requested
+      // Forward "stream" flag and speed so FastAPI returns framed stream and faster tempo when requested
+      const body = {
+        text: spoken,
+        stream,
+      };
+      if (requestedSpeed !== undefined) body.speed = requestedSpeed;
+      if (sample_rate !== undefined) body.sample_rate = sample_rate;
+
       const r = await fetch('http://127.0.0.1:5002/speak', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text: spoken, stream }),
+        body: JSON.stringify(body),
         signal: controller.signal,
       });
       clearTimeout(timeout);

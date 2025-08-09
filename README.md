@@ -9,6 +9,11 @@ This Node.js/Express backend powers Holly's features such as TTS. It listens on 
 - `stream` – stream the MP3 as it's produced
 - `json` – return `{ response: "..." }` instead of audio
 
+Environment variables:
+
+- `TTS_TEXT_MAX_CHARS` (default `600`): maximum characters sent to the TTS server before truncation.
+- `TTS_TIMEOUT_MS` (default `60000`): timeout in milliseconds for each TTS request.
+
 ## Cloudflare Tunnel
 
 A persistent [Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-apps/) exposes the backend without opening firewall ports.

@@ -4,6 +4,9 @@ const { Readable } = require('stream');
 
 const router = express.Router();
 
+const TTS_TEXT_MAX_CHARS = parseInt(process.env.TTS_TEXT_MAX_CHARS || '600', 10);
+const TTS_TIMEOUT_MS = parseInt(process.env.TTS_TIMEOUT_MS || '60000', 10);
+
 // POST /tts
 // Body: { text?, prompt?, generate=false, json=false, stream=false }
 // - if json=true returns {response:text}
@@ -59,59 +62,121 @@ router.post('/', async (req, res) => {
     return res.status(200).json({ response: spoken });
   }
 
-  // Proxy to FastAPI TTS server
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 15000);
+  if (spoken.length > TTS_TEXT_MAX_CHARS) {
+    console.warn(
+      `Truncating TTS text from ${spoken.length} to ${TTS_TEXT_MAX_CHARS}`
+    );
+    spoken = spoken.slice(0, TTS_TEXT_MAX_CHARS) + '…';
+  }
 
-  try {
-    const upstream = await fetch('http://127.0.0.1:5002/speak', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text: spoken }),
-      signal: controller.signal,
-    });
-    clearTimeout(timeout);
+  const sanitizedTranscript = spoken.replace(/[\r\n\t]/g, '');
+  const canSendTranscript =
+    sanitizedTranscript.length <= 200 &&
+    /^[\x20-\x7E]*$/.test(sanitizedTranscript);
 
-    if (!upstream.ok) {
-      const errText = await upstream.text().catch(() => '');
-      return res.status(500).json({
-        stage: 'tts-upstream',
-        status: upstream.status,
-        error: errText.slice(0, 200),
+  const start = Date.now();
+
+  async function callUpstream() {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), TTS_TIMEOUT_MS);
+    try {
+      const r = await fetch('http://127.0.0.1:5002/speak', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text: spoken }),
+        signal: controller.signal,
       });
+      clearTimeout(timeout);
+      return r;
+    } catch (err) {
+      clearTimeout(timeout);
+      throw err;
     }
+  }
 
-    res.status(200);
-    res.setHeader(
-      'Content-Type',
-      upstream.headers.get('content-type') || 'application/octet-stream'
-    );
-    res.setHeader(
-      'Cache-Control',
-      upstream.headers.get('cache-control') || 'no-store'
-    );
-    const conn = upstream.headers.get('connection');
-    if (conn) res.setHeader('Connection', conn);
-    res.setHeader('X-Transcript', spoken);
-
-    if (stream) {
-      res.setHeader('Transfer-Encoding', 'chunked');
-      if (upstream.body.pipe) upstream.body.pipe(res);
-      else Readable.from(upstream.body).pipe(res);
+  let upstream;
+  try {
+    upstream = await callUpstream();
+  } catch (err) {
+    if (err.name === 'AbortError') {
+      console.warn('TTS upstream timeout, retrying once...');
+      try {
+        upstream = await callUpstream();
+      } catch (e) {
+        const elapsedMs = Date.now() - start;
+        if (e.name === 'AbortError') {
+          console.error('Error in TTS stage: timeout');
+          return res
+            .status(500)
+            .json({ stage: 'tts', error: 'timeout', elapsedMs });
+        }
+        console.error('Error contacting TTS upstream:', e.message);
+        return res
+          .status(500)
+          .json({
+            stage: 'tts-upstream',
+            status: null,
+            error: e.message.slice(0, 512),
+            elapsedMs,
+          });
+      }
     } else {
-      const buffer = Buffer.from(await upstream.arrayBuffer());
-      res.setHeader(
-        'Content-Length',
-        upstream.headers.get('content-length') || String(buffer.length)
-      );
-      res.end(buffer);
+      const elapsedMs = Date.now() - start;
+      console.error('Error contacting TTS upstream:', err.message);
+      return res
+        .status(500)
+        .json({
+          stage: 'tts-upstream',
+          status: null,
+          error: err.message.slice(0, 512),
+          elapsedMs,
+        });
     }
-  } catch (e) {
-    const msg = e.name === 'AbortError' ? 'timeout' : e.message;
-    console.error('Error in TTS stage:', msg);
-    return res
-      .status(500)
-      .json({ stage: 'tts', error: msg, code: null, signal: null });
+  }
+
+  if (!upstream.ok) {
+    const errText = await upstream.text().catch(() => '');
+    const elapsedMs = Date.now() - start;
+    return res.status(500).json({
+      stage: 'tts-upstream',
+      status: upstream.status,
+      error: errText.slice(0, 512),
+      elapsedMs,
+    });
+  }
+
+  res.status(200);
+  res.setHeader(
+    'Content-Type',
+    upstream.headers.get('content-type') || 'application/octet-stream'
+  );
+  res.setHeader(
+    'Cache-Control',
+    upstream.headers.get('cache-control') || 'no-store'
+  );
+  const conn = upstream.headers.get('connection');
+  if (conn) res.setHeader('Connection', conn);
+  if (canSendTranscript) {
+    res.setHeader('X-Transcript', sanitizedTranscript);
+  }
+
+  if (stream) {
+    res.setHeader('Transfer-Encoding', 'chunked');
+    const src = upstream.body.pipe ? upstream.body : Readable.from(upstream.body);
+    src.pipe(res);
+    src.on('end', () => {
+      const elapsedMs = Date.now() - start;
+      console.log(`TTS elapsedMs ${elapsedMs}`);
+    });
+  } else {
+    const buffer = Buffer.from(await upstream.arrayBuffer());
+    res.setHeader(
+      'Content-Length',
+      upstream.headers.get('content-length') || String(buffer.length)
+    );
+    res.end(buffer);
+    const elapsedMs = Date.now() - start;
+    console.log(`TTS elapsedMs ${elapsedMs}`);
   }
 });
 

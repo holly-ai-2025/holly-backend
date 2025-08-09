@@ -25,8 +25,18 @@ except Exception:  # pragma: no cover
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("tts_server")
 
-MODEL_ID = os.getenv("TTS_MODEL", "tts_models/en/ljspeech/tacotron2-DDC")
+# === Voice & runtime knobs =====================================================
+
+# Default to the EK1 Tacotron2 model (warmer than LJS/DDC)
+MODEL_ID = os.getenv("TTS_MODEL", "tts_models/en/ek1/tacotron2")
+
+# Basic tempo control: >1.0 = faster (shorter). Lightweight resample (pitch will
+# creep a little at higher speeds; good enough for “not too slow”).
+DEFAULT_SPEED = float(os.getenv("TTS_SPEED", "1.12"))
+
 TTS_DEVICE = os.getenv("TTS_DEVICE", "auto").lower()
+
+# ==============================================================================
 
 
 def _init_tts():
@@ -46,16 +56,13 @@ init_ms = int((time.perf_counter() - init_start) * 1000)
 if tts is None:
     class DummyTTS:
         """Fallback synthesizer producing a sine wave."""
-
         def __init__(self, sr: int = 22050):
             self.sample_rate = sr
             self.device = "cpu"
-
         def tts(self, text: str):
             duration = max(1.2, len(text) * 0.06)
             t = np.linspace(0, duration, int(self.sample_rate * duration), endpoint=False)
             return 0.2 * np.sin(2 * np.pi * 440 * t)
-
     tts = DummyTTS()
 
 want_cuda = TTS_DEVICE in ("auto", "cuda")
@@ -81,7 +88,7 @@ device_name = (
 )
 
 logger.info(
-    "TTS init model=%s device=%s torch=%s cuda_avail=%s cuda_count=%s current_device=%s device_name=%s sr=%s init_ms=%s",
+    "TTS init model=%s device=%s torch=%s cuda_avail=%s cuda_count=%s current_device=%s device_name=%s sr=%s init_ms=%s speed=%.3f",
     MODEL_ID,
     device_used,
     torch_version,
@@ -91,6 +98,7 @@ logger.info(
     device_name,
     DEFAULT_SR,
     init_ms,
+    DEFAULT_SPEED,
 )
 
 
@@ -100,25 +108,45 @@ app = FastAPI()
 class SpeakRequest(BaseModel):
     """Request payload for /speak.
 
-    Setting ``stream`` to ``True`` enables chunked audio output which starts
-    sending a WAV header followed by PCM data as soon as each text chunk is
-    synthesized.  When omitted or ``False`` the entire WAV is returned once
-    synthesis completes, preserving the legacy behaviour.
-    """
+    stream=True  -> framed mini-WAVs with header 'X-Stream-Framing: wav-l32be'
+    stream=False -> single WAV blob
 
+    Optional 'speed' lets callers nudge tempo (>1.0 = faster).
+    """
     text: str
     sample_rate: int | None = None
     stream: bool | None = False
+    speed: float | None = None  # >1.0 = faster
 
 
-def synthesize(text: str) -> np.ndarray:
+def _apply_speed(wav: np.ndarray, speed: float) -> np.ndarray:
+    """Lightweight time-compression/expansion via linear resample.
+    speed>1.0 = faster/shorter. This is not a phase-vocoder, so pitch will shift slightly.
+    """
+    if speed is None or abs(speed - 1.0) < 1e-3:
+        return wav
+    speed = max(0.5, min(2.0, float(speed)))  # clamp to a sane range
+    n = wav.shape[0]
+    new_n = max(1, int(n / speed))
+    # linspace over original index space, then interpolate
+    x_old = np.arange(n, dtype=np.float64)
+    x_new = np.linspace(0, n - 1, new_n, dtype=np.float64)
+    return np.interp(x_new, x_old, wav).astype(np.float32)
+
+
+def synthesize(text: str, speed: float | None = None) -> np.ndarray:
     if torch is not None:
         with torch.inference_mode():
             if getattr(tts, "device", "cpu") == "cuda":
                 try:
-                    from torch.cuda.amp import autocast
-
-                    with autocast():
+                    # Prefer torch.amp autocast API when available
+                    try:
+                        from torch.amp import autocast  # type: ignore[attr-defined]
+                        autocast_ctx = autocast("cuda")
+                    except Exception:  # fallback for older torch
+                        from torch.cuda.amp import autocast  # type: ignore
+                        autocast_ctx = autocast()
+                    with autocast_ctx:
                         y = tts.tts(text)
                 except Exception as ex:  # pragma: no cover
                     logger.warning("AMP disabled due to error: %s", ex)
@@ -131,13 +159,24 @@ def synthesize(text: str) -> np.ndarray:
     wav = np.asarray(y, dtype=np.float32)
     if wav.ndim > 1:
         wav = np.mean(wav, axis=1).astype(np.float32)
+
+    # Trim leading/trailing silence (mild) to tighten pacing a bit
+    thr = 0.0025
+    nz = np.where(np.abs(wav) > thr)[0]
+    if nz.size > 0:
+        wav = wav[nz[0]: nz[-1] + 1]
+
+    # Apply simple tempo
+    eff_speed = speed if speed is not None else DEFAULT_SPEED
+    wav = _apply_speed(wav, eff_speed)
+
     return wav
 
 
 WARMED_UP = False
 try:
     warm_start = time.perf_counter()
-    synthesize("warmup")
+    synthesize("warmup", speed=DEFAULT_SPEED)
     warmup_ms = int((time.perf_counter() - warm_start) * 1000)
     WARMED_UP = True
     logger.info("TTS warmup_ms=%s", warmup_ms)
@@ -184,8 +223,8 @@ def make_wav_header(data_len: int, sample_rate: int = 24000,
     )
 
 
-async def synthesize_chunk_to_pcm(text: str, sample_rate: int = DEFAULT_SR) -> tuple[bytes, int]:
-    wav = await asyncio.to_thread(synthesize, text)
+async def synthesize_chunk_to_pcm(text: str, sample_rate: int, speed: float | None) -> tuple[bytes, int]:
+    wav = await asyncio.to_thread(synthesize, text, speed)
     pcm = float32_to_pcm_bytes(wav)
     return pcm, sample_rate
 
@@ -215,20 +254,22 @@ def speak(req: SpeakRequest):
     if long_text:
         logger.info("long_text chars=%s", len(text))
     stream = bool(req.stream)
+    speed = float(req.speed) if req.speed is not None else DEFAULT_SPEED
     try:
         if stream:
             chunks = chunk_text(text)
-            logger.info("streaming chunks=%s", len(chunks))
+            logger.info("streaming chunks=%s speed=%.3f", len(chunks), speed)
 
             async def gen():
                 for part in chunks:
                     synth_start = time.perf_counter()
-                    pcm, sr_used = await synthesize_chunk_to_pcm(part, sr)
+                    pcm, sr_used = await synthesize_chunk_to_pcm(part, sr, speed)
                     synth_ms = int((time.perf_counter() - synth_start) * 1000)
                     logger.info("chunk_synth_ms=%s device=%s", synth_ms, tts.device)
                     header = make_wav_header(len(pcm), sample_rate=sr_used,
                                               channels=1, bits_per_sample=16)
                     frame = header + pcm
+                    # 4-byte big-endian length prefix (mini-wav frame)
                     yield struct.pack(">I", len(frame))
                     yield frame
                     await asyncio.sleep(0)
@@ -243,10 +284,10 @@ def speak(req: SpeakRequest):
             )
 
         synth_start = time.perf_counter()
-        wav = synthesize(text)
+        wav = synthesize(text, speed=speed)
         synth_ms = int((time.perf_counter() - synth_start) * 1000)
         data, _ = float32_to_wav_bytes(wav, sr)
-        logger.info("synth_ms=%s device=%s", synth_ms, tts.device)
+        logger.info("synth_ms=%s device=%s speed=%.3f", synth_ms, tts.device, speed)
         return Response(
             content=data, media_type="audio/wav", headers={"Cache-Control": "no-store"}
         )
@@ -260,12 +301,13 @@ def speak_debug(req: SpeakRequest):
     if not text:
         raise HTTPException(status_code=400, detail="text is required")
     sr = int(req.sample_rate or DEFAULT_SR)
+    speed = float(req.speed) if req.speed is not None else DEFAULT_SPEED
     long_text = len(text) > 320
     if long_text:
         logger.info("long_text chars=%s", len(text))
     try:
         synth_start = time.perf_counter()
-        wav = synthesize(text)
+        wav = synthesize(text, speed=speed)
         synth_ms = int((time.perf_counter() - synth_start) * 1000)
         data, pcm_len = float32_to_wav_bytes(wav, sr)
         duration = float(len(wav) / sr)
@@ -283,6 +325,8 @@ def speak_debug(req: SpeakRequest):
             "warmup_done": WARMED_UP,
             "synth_ms": synth_ms,
             "long_text": long_text,
+            "speed": speed,
+            "model": MODEL_ID,
         }
         if warn:
             resp["warning"] = warn
@@ -300,6 +344,7 @@ def health():
         "sample_rate": DEFAULT_SR,
         "torch_version": torch_version,
         "cuda_available": cuda_avail,
+        "default_speed": DEFAULT_SPEED,
     }
 
 
@@ -312,5 +357,6 @@ def env_debug():
         "current_device": current_device,
         "device_name": device_name,
         "device_used": tts.device,
+        "model": MODEL_ID,
+        "default_speed": DEFAULT_SPEED,
     }
-

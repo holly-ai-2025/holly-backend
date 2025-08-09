@@ -12,7 +12,7 @@ const TTS_TIMEOUT_MS = parseInt(process.env.TTS_TIMEOUT_MS || '60000', 10);
 // - if json=true returns {response:text} (no audio)
 // - text skips LLM and proxies directly to FastAPI
 // - prompt with generate=true will call Ollama once to create text
-// - stream=true proxies chunked audio as it is produced (NO transcript headers)
+// - stream=true proxies framed audio as it is produced (NO transcript headers)
 router.post('/', async (req, res) => {
   const {
     text,
@@ -61,7 +61,7 @@ router.post('/', async (req, res) => {
 
   // STEP 1 path: return JSON transcript only (frontend shows text immediately)
   if (json) {
-    // Do not try to send transcript in headers; plain JSON only.
+    // Plain JSON only; no transcript headers (to avoid header issues)
     return res.status(200).json({ response: spoken });
   }
 
@@ -79,7 +79,7 @@ router.post('/', async (req, res) => {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), TTS_TIMEOUT_MS);
     try {
-      // Forward "stream" flag to FastAPI so it knows to return chunked audio
+      // Forward "stream" flag so FastAPI returns framed stream when requested
       const r = await fetch('http://127.0.0.1:5002/speak', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -141,19 +141,31 @@ router.post('/', async (req, res) => {
     });
   }
 
-  // Common response headers (no transcript headers at all)
+  // Common response headers (NO X-Transcript header at all)
   res.status(200);
   res.setHeader(
-    'Content-Type',
-    upstream.headers.get('content-type') || 'application/octet-stream'
+    'Cache-Control',
+    upstream.headers.get('cache-control') || 'no-store'
   );
-  res.setHeader('Cache-Control', upstream.headers.get('cache-control') || 'no-store');
+
   const framing = upstream.headers.get('x-stream-framing');
-  if (framing) res.setHeader('X-Stream-Framing', framing);
+
+  if (stream && framing) {
+    // Streaming framed mini-WAVs from FastAPI
+    res.setHeader('Content-Type', 'application/octet-stream');
+    res.setHeader('X-Stream-Framing', framing);
+    // Let browsers read the custom header via fetch()
+    res.setHeader('Access-Control-Expose-Headers', 'X-Stream-Framing');
+  } else {
+    // Non-streaming: return the full WAV (or whatever upstream provided)
+    res.setHeader(
+      'Content-Type',
+      upstream.headers.get('content-type') || 'audio/wav'
+    );
+  }
 
   if (stream) {
-    // Streaming audio only — do NOT set X-Transcript in streaming mode.
-    // (Avoids "Invalid character in header content" & proxy buffer issues.)
+    // Streaming audio only — do NOT set transcript headers in streaming mode.
     // Let Node set Transfer-Encoding: chunked automatically when piping.
     const src = upstream.body.pipe ? upstream.body : Readable.from(upstream.body);
     src.pipe(res);

@@ -12,6 +12,7 @@ const TTS_TIMEOUT_MS = parseInt(process.env.TTS_TIMEOUT_MS || '60000', 10);
 // - if json=true returns {response:text}
 // - text skips LLM and proxies directly to FastAPI
 // - prompt with generate=true will call Ollama once to create text
+// - stream=true proxies chunked audio as it is produced
 router.post('/', async (req, res) => {
   const {
     text,
@@ -69,10 +70,11 @@ router.post('/', async (req, res) => {
     spoken = spoken.slice(0, TTS_TEXT_MAX_CHARS) + '…';
   }
 
-  const sanitizedTranscript = spoken.replace(/[\r\n\t]/g, '');
-  const canSendTranscript =
-    sanitizedTranscript.length <= 200 &&
-    /^[\x20-\x7E]*$/.test(sanitizedTranscript);
+  // Avoid illegal header characters by stripping newlines and URI encoding.
+  const sanitizedTranscript = encodeURIComponent(
+    spoken.replace(/[\r\n]+/g, ' ')
+  );
+  const canSendTranscript = sanitizedTranscript.length <= 800;
 
   const start = Date.now();
 
@@ -80,10 +82,11 @@ router.post('/', async (req, res) => {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), TTS_TIMEOUT_MS);
     try {
+      // Forward "stream" flag to FastAPI so it knows to return chunked audio
       const r = await fetch('http://127.0.0.1:5002/speak', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text: spoken }),
+        body: JSON.stringify({ text: spoken, stream }),
         signal: controller.signal,
       });
       clearTimeout(timeout);
